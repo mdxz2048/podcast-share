@@ -22,9 +22,6 @@ export function Nav() {
               {item.label}
             </Link>
           ))}
-          <Link href="/admin/login" className="hover:text-ink">
-            后台登录
-          </Link>
         </nav>
       </div>
     </header>

@@ -59,6 +59,16 @@ pnpm dev
 - 管理员节目开放、关闭、可见范围基础 API
 - 用户端节目与 RSS 页面接入
 
+## 阶段 3 已实现
+
+- 管理员 Connector ZIP 上传
+- ZIP 静态安全校验与 manifest schema 校验
+- Connector 审核启用、禁用
+- Source 创建、更新、启用、禁用
+- Source 公开配置与 Secret 分离存储
+- Secret 加密存储（AES-256-GCM）
+- 管理员端 Connector 与 Source 页面基础交互
+
 ## 管理员初始化
 
 默认从 `.env` 读取：
@@ -91,3 +101,4 @@ pnpm --filter @podcast-hub/api test
 
 - `docs/stage-1.md`
 - `docs/stage-2.md`
+- `docs/stage-3.md`
