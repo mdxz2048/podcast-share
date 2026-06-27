@@ -1,7 +1,8 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { executeSourceImport } from "../services/job-execution.js";
 
-function assertAdmin(request: { user: { isAdmin: boolean } | null }, reply: any): boolean {
+function assertAdmin(request: { user: { id: string; isAdmin: boolean } | null }, reply: any): request is { user: { id: string; isAdmin: boolean } } {
   if (!request.user || !request.user.isAdmin) {
     reply.status(401).send({ message: "未登录管理员" });
     return false;
@@ -166,15 +167,17 @@ export async function adminJobRoutes(app: FastifyInstance): Promise<void> {
     const { jobId } = z.object({ jobId: z.string().uuid() }).parse(request.params);
     const body = z.object({ input: z.record(z.any()) }).parse(request.body);
 
-    const jobRes = await app.pg.query("select status from import_jobs where id = $1", [jobId]);
+    const jobRes = await app.pg.query("select status, source_id from import_jobs where id = $1", [jobId]);
     if ((jobRes.rowCount ?? 0) === 0) {
       return reply.status(404).send({ message: "任务不存在" });
     }
 
     const status = jobRes.rows[0].status as string;
-    if (!['waiting_for_input', 'waiting_for_auth'].includes(status)) {
+    if (!["waiting_for_input", "waiting_for_auth"].includes(status)) {
       return reply.status(400).send({ message: "任务当前不需要输入" });
     }
+
+    const sourceId = jobRes.rows[0].source_id as string;
 
     await app.pg.query(
       `insert into import_job_events (id, job_id, event_type, level, message, payload_json, created_at)
@@ -182,6 +185,23 @@ export async function adminJobRoutes(app: FastifyInstance): Promise<void> {
       [jobId, JSON.stringify({ keys: Object.keys(body.input) })]
     );
 
-    return { message: "输入已记录，阶段 5 将接入任务恢复执行" };
+    try {
+      const result = await executeSourceImport(app, {
+        sourceId,
+        triggerType: "resume",
+        createdBy: request.user.id,
+        additionalInput: body.input,
+        existingJobId: jobId
+      });
+
+      return {
+        message: "输入已提交并恢复执行",
+        jobId,
+        status: result.status,
+        summary: result.summary
+      };
+    } catch (error) {
+      return reply.status(400).send({ message: error instanceof Error ? error.message : "恢复执行失败" });
+    }
   });
 }

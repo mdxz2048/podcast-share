@@ -10,6 +10,7 @@
     "test": "echo 'worker tests pending'"
   },
   "devDependencies": {
+    "@types/node": "^22.7.4",
     "tsx": "^4.19.1",
     "typescript": "^5.6.3"
   }

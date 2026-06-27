@@ -15,6 +15,7 @@ export default function AdminJobDetailPage({ params }: { params: { id: string } 
   const [status, setStatus] = useState("");
   const [summary, setSummary] = useState("");
   const [events, setEvents] = useState<JobEvent[]>([]);
+  const [inputText, setInputText] = useState('{"otp":""}');
   const [message, setMessage] = useState("加载中...");
 
   async function load() {
@@ -45,6 +46,26 @@ export default function AdminJobDetailPage({ params }: { params: { id: string } 
     await load();
   }
 
+  async function submitInput() {
+    let input: Record<string, unknown>;
+    try {
+      input = JSON.parse(inputText);
+    } catch {
+      setMessage("输入 JSON 格式错误");
+      return;
+    }
+
+    const res = await fetch(`${apiBase}/admin/jobs/${params.id}/submit-input`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ input })
+    });
+    const json = await res.json();
+    setMessage(json.message ?? (res.ok ? "输入已提交" : "提交失败"));
+    await load();
+  }
+
   return (
     <section className="space-y-4">
       <h1 className="text-2xl font-semibold">任务详情</h1>
@@ -55,6 +76,14 @@ export default function AdminJobDetailPage({ params }: { params: { id: string } 
       <button className="button" onClick={cancelJob}>
         取消任务
       </button>
+
+      <div className="card space-y-3">
+        <h2 className="text-base font-medium">提交等待输入</h2>
+        <textarea className="input min-h-24" value={inputText} onChange={(event) => setInputText(event.target.value)} />
+        <button className="button" onClick={submitInput}>
+          提交并恢复
+        </button>
+      </div>
 
       <div className="space-y-2">
         {events.map((event, index) => (

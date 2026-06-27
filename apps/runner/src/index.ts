@@ -137,8 +137,17 @@ app.post("/internal/run-import", async (request, reply) => {
 			return rest;
 		});
 
+		const hasAuthRequired = normalizedEvents.some((item) => item.type === "auth_required");
+		const hasInputRequired = normalizedEvents.some((item) => item.type === "input_required");
+		let status: "completed" | "failed" | "waiting_for_input" | "waiting_for_auth" = runResult.exitCode === 0 ? "completed" : "failed";
+		if (runResult.exitCode === 0 && hasAuthRequired) {
+			status = "waiting_for_auth";
+		} else if (runResult.exitCode === 0 && hasInputRequired) {
+			status = "waiting_for_input";
+		}
+
 		return {
-			status: runResult.exitCode === 0 ? "completed" : "failed",
+			status,
 			exitCode: runResult.exitCode,
 			events: normalizedEvents,
 			copiedMediaCount: copiedMedia.length,

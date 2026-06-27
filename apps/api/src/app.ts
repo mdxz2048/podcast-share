@@ -12,6 +12,7 @@ import { adminProgramRoutes } from "./routes/admin-programs.js";
 import { adminConnectorRoutes } from "./routes/admin-connectors.js";
 import { adminSourceRoutes } from "./routes/admin-sources.js";
 import { adminJobRoutes } from "./routes/admin-jobs.js";
+import { internalScheduleRoutes } from "./routes/internal-schedules.js";
 
 export function buildApp() {
   const app = Fastify({ logger: true });
@@ -37,6 +38,7 @@ export function buildApp() {
   app.register(adminConnectorRoutes);
   app.register(adminSourceRoutes);
   app.register(adminJobRoutes);
+  app.register(internalScheduleRoutes);
 
   app.get("/health", async () => ({ ok: true }));
 

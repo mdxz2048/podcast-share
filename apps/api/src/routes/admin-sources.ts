@@ -1,9 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { decryptSecret, encryptSecret } from "../utils/secrets.js";
-import { env } from "../config.js";
-import { applyRunnerEvents } from "../services/import-processing.js";
-import { assertTransition, type JobStatus } from "../utils/job-state.js";
+import { executeSourceImport } from "../services/job-execution.js";
 
 function assertAdmin(request: { user: { id: string; isAdmin: boolean } | null }, reply: any): request is { user: { id: string; isAdmin: boolean } } {
   if (!request.user || !request.user.isAdmin) {
@@ -14,6 +12,9 @@ function assertAdmin(request: { user: { id: string; isAdmin: boolean } | null },
 }
 
 type ManifestLike = {
+  run_modes?: { scheduled?: boolean };
+  schedule?: { minimum_interval_minutes?: number };
+  authentication?: { unattended_supported?: boolean };
   inputs?: Array<{ key: string }>;
   secrets?: Array<{ key: string }>;
 };
@@ -42,16 +43,25 @@ function splitConfigByManifest(manifest: ManifestLike, inputConfig: Record<strin
   };
 }
 
-async function transitionJobStatus(app: FastifyInstance, jobId: string, to: JobStatus) {
-  const currentRes = await app.pg.query("select status from import_jobs where id = $1", [jobId]);
-  if ((currentRes.rowCount ?? 0) === 0) {
-    throw new Error("job not found");
+function computeNextRunAt(scheduleType: string, cronExpression: string | null): Date {
+  const now = new Date();
+  if (scheduleType === "hourly") {
+    return new Date(now.getTime() + 60 * 60 * 1000);
   }
-
-  const from = currentRes.rows[0].status as JobStatus;
-  assertTransition(from, to);
-
-  await app.pg.query("update import_jobs set status = $1, updated_at = now() where id = $2", [to, jobId]);
+  if (scheduleType === "every_6_hours") {
+    return new Date(now.getTime() + 6 * 60 * 60 * 1000);
+  }
+  if (scheduleType === "daily") {
+    return new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  }
+  if (scheduleType === "weekly") {
+    return new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  }
+  if (scheduleType === "cron" && cronExpression) {
+    // v1 简化实现：cron 先按 1 小时推进，后续可替换为完整 cron parser。
+    return new Date(now.getTime() + 60 * 60 * 1000);
+  }
+  return new Date(now.getTime() + 60 * 60 * 1000);
 }
 
 export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
@@ -215,6 +225,16 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
       [sourceId]
     );
 
+    const scheduleRes = await app.pg.query(
+      `select id, enabled, paused, schedule_type, cron_expression, minimum_interval_minutes,
+              next_run_at, last_run_at, last_success_at, last_error_at, updated_at
+       from schedules
+       where source_id = $1
+       order by created_at desc
+       limit 1`,
+      [sourceId]
+    );
+
     const source = sourceRes.rows[0];
     return {
       id: source.id,
@@ -239,7 +259,8 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
         key: row.secret_key,
         status: row.status,
         updatedAt: row.updated_at
-      }))
+      })),
+      schedule: (scheduleRes.rowCount ?? 0) > 0 ? scheduleRes.rows[0] : null
     };
   });
 
@@ -340,18 +361,129 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
 
     const { sourceId } = z.object({ sourceId: z.string().uuid() }).parse(request.params);
 
+    try {
+      const result = await executeSourceImport(app, {
+        sourceId,
+        triggerType: "manual",
+        createdBy: request.user.id
+      });
+
+      return {
+        message: result.status === "completed" ? "任务完成" : "任务执行中",
+        jobId: result.jobId,
+        status: result.status,
+        summary: result.summary
+      };
+    } catch (error) {
+      return reply.status(400).send({ message: error instanceof Error ? error.message : "任务执行失败" });
+    }
+  });
+
+  app.post("/admin/sources/:sourceId/auth", async (request, reply) => {
+    if (!assertAdmin(request, reply)) {
+      return;
+    }
+
+    const { sourceId } = z.object({ sourceId: z.string().uuid() }).parse(request.params);
+    const body = z
+      .object({
+        mode: z.string().min(1),
+        summary: z.string().optional(),
+        unattendedReady: z.boolean().default(false)
+      })
+      .parse(request.body);
+
+    const sourceRes = await app.pg.query("select id from connector_sources where id = $1", [sourceId]);
+    if ((sourceRes.rowCount ?? 0) === 0) {
+      return reply.status(404).send({ message: "Source 不存在" });
+    }
+
+    await app.pg.query(
+      `insert into auth_profiles (id, source_id, mode, status, summary, updated_at)
+       values (gen_random_uuid(), $1, $2, 'configured', $3, now())
+       on conflict (source_id)
+       do update set mode = excluded.mode, status = excluded.status, summary = excluded.summary, updated_at = now()`,
+      [sourceId, body.mode, body.summary ?? null]
+    );
+
+    await app.pg.query(
+      `update connector_sources
+       set auth_status = 'configured', auth_unattended_ready = $1, updated_at = now()
+       where id = $2`,
+      [body.unattendedReady, sourceId]
+    );
+
+    return { message: "认证状态已更新" };
+  });
+
+  app.post("/admin/sources/:sourceId/auth/submit-input", async (request, reply) => {
+    if (!assertAdmin(request, reply)) {
+      return;
+    }
+
+    const { sourceId } = z.object({ sourceId: z.string().uuid() }).parse(request.params);
+    const body = z.object({ input: z.record(z.string()) }).parse(request.body);
+
     const sourceRes = await app.pg.query(
-      `select s.id, s.name, s.enabled, s.auth_status,
-              s.connector_id, s.connector_version_id,
-              c.name as connector_name,
-              cv.version as connector_version,
-              cv.package_path,
-              cv.manifest_json,
-              csc.config_json
+      `select s.id, cv.manifest_json
        from connector_sources s
-       join connectors c on c.id = s.connector_id
        join connector_versions cv on cv.id = s.connector_version_id
-       left join connector_source_configs csc on csc.source_id = s.id
+       where s.id = $1`,
+      [sourceId]
+    );
+    if ((sourceRes.rowCount ?? 0) === 0) {
+      return reply.status(404).send({ message: "Source 不存在" });
+    }
+
+    const manifest = sourceRes.rows[0].manifest_json as ManifestLike;
+    const normalized = splitConfigByManifest(manifest, {}, body.input);
+
+    for (const [secretKey, secretValue] of Object.entries(normalized.secrets)) {
+      const secretCipher = encryptSecret(secretValue);
+      const secretRes = await app.pg.query(
+        `insert into secret_records (id, secret_kind, cipher_text, key_version, status, created_at, updated_at)
+         values (gen_random_uuid(), $1, $2, 'v1', 'configured', now(), now())
+         returning id`,
+        [secretKey, secretCipher]
+      );
+
+      await app.pg.query(
+        `insert into source_secret_bindings (source_id, secret_key, secret_record_id, created_at, updated_at)
+         values ($1, $2, $3, now(), now())
+         on conflict (source_id, secret_key)
+         do update set secret_record_id = excluded.secret_record_id, updated_at = now()`,
+        [sourceId, secretKey, secretRes.rows[0].id]
+      );
+    }
+
+    await app.pg.query(
+      `update connector_sources
+       set auth_status = 'configured', auth_unattended_ready = true, updated_at = now()
+       where id = $1`,
+      [sourceId]
+    );
+
+    return { message: "认证输入已提交" };
+  });
+
+  app.post("/admin/sources/:sourceId/schedule", async (request, reply) => {
+    if (!assertAdmin(request, reply)) {
+      return;
+    }
+
+    const { sourceId } = z.object({ sourceId: z.string().uuid() }).parse(request.params);
+    const body = z
+      .object({
+        scheduleType: z.enum(["hourly", "every_6_hours", "daily", "weekly", "cron"]),
+        cronExpression: z.string().optional(),
+        enabled: z.boolean().default(true)
+      })
+      .parse(request.body);
+
+    const sourceRes = await app.pg.query(
+      `select s.id, cv.manifest_json
+       from connector_sources s
+       join connector_versions cv on cv.id = s.connector_version_id
        where s.id = $1`,
       [sourceId]
     );
@@ -360,148 +492,111 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(404).send({ message: "Source 不存在" });
     }
 
-    const source = sourceRes.rows[0];
-
-    const runningRes = await app.pg.query(
-      `select id from import_jobs
-       where source_id = $1 and status in ('running', 'waiting_for_input', 'waiting_for_auth')
-       limit 1`,
-      [sourceId]
-    );
-    if ((runningRes.rowCount ?? 0) > 0) {
-      return reply.status(409).send({ message: "该 Source 已有运行中的任务" });
+    const manifest = sourceRes.rows[0].manifest_json as ManifestLike;
+    if (!manifest.run_modes?.scheduled) {
+      return reply.status(400).send({ message: "该 Connector 不支持周期任务" });
     }
 
-    const secretRows = await app.pg.query(
-      `select ssb.secret_key, sr.cipher_text
-       from source_secret_bindings ssb
-       join secret_records sr on sr.id = ssb.secret_record_id
-       where ssb.source_id = $1`,
-      [sourceId]
-    );
+    const minimumInterval = manifest.schedule?.minimum_interval_minutes ?? 60;
+    const cronExpression = body.scheduleType === "cron" ? body.cronExpression ?? "0 * * * *" : null;
+    const nextRunAt = computeNextRunAt(body.scheduleType, cronExpression);
 
-    const secretConfig: Record<string, string> = {};
-    for (const row of secretRows.rows) {
-      secretConfig[row.secret_key] = decryptSecret(row.cipher_text);
-    }
-
-    const inputConfig = (source.config_json ?? {}) as Record<string, unknown>;
-
-    const inputSummary = {
-      keys: Object.keys(inputConfig),
-      sourceName: source.name
-    };
-    const authSummary = {
-      status: source.auth_status,
-      secretKeys: Object.keys(secretConfig)
-    };
-
-    const jobRes = await app.pg.query(
-      `insert into import_jobs (
-          id, source_id, connector_id, connector_version_id, trigger_type, status,
-          started_at, input_summary_json, auth_summary_json,
-          created_by, created_at, updated_at
+    const scheduleRes = await app.pg.query(
+      `insert into schedules (
+          id, source_id, enabled, paused, schedule_type, cron_expression,
+          minimum_interval_minutes, next_run_at, created_at, updated_at
        ) values (
-          gen_random_uuid(), $1, $2, $3, 'manual', 'queued',
-          now(), $4::jsonb, $5::jsonb,
-          $6, now(), now()
-       ) returning id`,
-      [sourceId, source.connector_id, source.connector_version_id, JSON.stringify(inputSummary), JSON.stringify(authSummary), request.user.id]
-    );
-
-    const jobId = jobRes.rows[0].id;
-
-    await app.pg.query(
-      `insert into import_job_inputs (id, job_id, input_summary_json, created_at)
-       values (gen_random_uuid(), $1, $2::jsonb, now())`,
-      [jobId, JSON.stringify({ inputSummary, authSummary })]
-    );
-
-    try {
-      await transitionJobStatus(app, jobId, "running");
-    } catch (error) {
-      return reply.status(500).send({ message: error instanceof Error ? error.message : "任务状态更新失败" });
-    }
-
-    const runnerResponse = await fetch(`${env.RUNNER_BASE_URL}/internal/run-import`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        jobId,
-        packagePath: source.package_path,
-        manifest: source.manifest_json,
-        inputConfig,
-        secretConfig
-      })
-    });
-
-    const runnerJson = await runnerResponse.json();
-    if (!runnerResponse.ok) {
-      await app.pg.query(
-        `update import_jobs
-         set status = 'failed', ended_at = now(), error_summary = $1, updated_at = now()
-         where id = $2`,
-        [runnerJson.message ?? "runner 执行失败", jobId]
-      );
-      await app.pg.query("update connector_sources set last_job_status = 'failed', updated_at = now() where id = $1", [sourceId]);
-      return reply.status(502).send({ message: "Runner 执行失败", jobId });
-    }
-
-    const events = Array.isArray(runnerJson.events) ? (runnerJson.events as Array<Record<string, unknown>>) : [];
-    const importSummary = await applyRunnerEvents(app, jobId, sourceId, events);
-
-    const finalStatus: JobStatus = runnerJson.status === "completed" ? "completed" : "failed";
-    await app.pg.query(
-      `update import_jobs
-       set status = $1,
-           ended_at = now(),
-           output_summary_json = $2::jsonb,
-           discovered_programs = $3,
-           discovered_episodes = $4,
-           imported_media = $5,
-           failed_count = $6,
-           error_summary = $7,
-           updated_at = now()
-       where id = $8`,
-      [
-        finalStatus,
-        JSON.stringify({ runnerStatus: runnerJson.status, copiedMediaCount: runnerJson.copiedMediaCount ?? 0 }),
-        importSummary.programs,
-        importSummary.episodes,
-        importSummary.media,
-        importSummary.failed,
-        runnerJson.stderr ?? null,
-        jobId
-      ]
-    );
-
-    await app.pg.query(
-      `insert into import_job_outputs (id, job_id, output_summary_json, created_at)
-       values (gen_random_uuid(), $1, $2::jsonb, now())`,
-      [
-        jobId,
-        JSON.stringify({
-          runnerStatus: runnerJson.status,
-          importSummary
-        })
-      ]
-    );
-
-    await app.pg.query(
-      `update connector_sources
-       set last_job_status = $1,
-           last_success_sync_at = case when $1 = 'completed' then now() else last_success_sync_at end,
-           updated_at = now()
-       where id = $2`,
-      [finalStatus, sourceId]
+          gen_random_uuid(), $1, $2, false, $3, $4,
+          $5, $6, now(), now()
+       )
+       on conflict (source_id)
+       do update set
+         enabled = excluded.enabled,
+         paused = false,
+         schedule_type = excluded.schedule_type,
+         cron_expression = excluded.cron_expression,
+         minimum_interval_minutes = excluded.minimum_interval_minutes,
+         next_run_at = excluded.next_run_at,
+         updated_at = now()
+       returning id, source_id, enabled, paused, schedule_type, cron_expression, minimum_interval_minutes, next_run_at`,
+      [sourceId, body.enabled, body.scheduleType, cronExpression, minimumInterval, nextRunAt]
     );
 
     return {
-      message: finalStatus === "completed" ? "任务完成" : "任务失败",
-      jobId,
-      status: finalStatus,
-      summary: importSummary
+      message: "周期任务已保存",
+      schedule: scheduleRes.rows[0]
     };
+  });
+
+  app.patch("/admin/schedules/:scheduleId", async (request, reply) => {
+    if (!assertAdmin(request, reply)) {
+      return;
+    }
+
+    const { scheduleId } = z.object({ scheduleId: z.string().uuid() }).parse(request.params);
+    const body = z
+      .object({
+        enabled: z.boolean().optional(),
+        scheduleType: z.enum(["hourly", "every_6_hours", "daily", "weekly", "cron"]).optional(),
+        cronExpression: z.string().optional()
+      })
+      .parse(request.body);
+
+    const currentRes = await app.pg.query("select id, schedule_type, cron_expression from schedules where id = $1", [scheduleId]);
+    if ((currentRes.rowCount ?? 0) === 0) {
+      return reply.status(404).send({ message: "周期任务不存在" });
+    }
+
+    const scheduleType = body.scheduleType ?? currentRes.rows[0].schedule_type;
+    const cronExpression = scheduleType === "cron" ? body.cronExpression ?? currentRes.rows[0].cron_expression ?? "0 * * * *" : null;
+
+    await app.pg.query(
+      `update schedules
+       set enabled = coalesce($1, enabled),
+           schedule_type = $2,
+           cron_expression = $3,
+           next_run_at = $4,
+           updated_at = now()
+       where id = $5`,
+      [body.enabled ?? null, scheduleType, cronExpression, computeNextRunAt(scheduleType, cronExpression), scheduleId]
+    );
+
+    return { message: "周期任务已更新" };
+  });
+
+  app.post("/admin/schedules/:scheduleId/pause", async (request, reply) => {
+    if (!assertAdmin(request, reply)) {
+      return;
+    }
+
+    const { scheduleId } = z.object({ scheduleId: z.string().uuid() }).parse(request.params);
+    await app.pg.query("update schedules set paused = true, updated_at = now() where id = $1", [scheduleId]);
+    return { message: "周期任务已暂停" };
+  });
+
+  app.post("/admin/schedules/:scheduleId/resume", async (request, reply) => {
+    if (!assertAdmin(request, reply)) {
+      return;
+    }
+
+    const { scheduleId } = z.object({ scheduleId: z.string().uuid() }).parse(request.params);
+
+    const currentRes = await app.pg.query("select schedule_type, cron_expression from schedules where id = $1", [scheduleId]);
+    if ((currentRes.rowCount ?? 0) === 0) {
+      return reply.status(404).send({ message: "周期任务不存在" });
+    }
+
+    const row = currentRes.rows[0];
+    const nextRunAt = computeNextRunAt(row.schedule_type, row.cron_expression);
+
+    await app.pg.query(
+      `update schedules
+       set paused = false, enabled = true, next_run_at = $1, updated_at = now()
+       where id = $2`,
+      [nextRunAt, scheduleId]
+    );
+
+    return { message: "周期任务已恢复" };
   });
 
   app.post("/admin/sources/:sourceId/disable", async (request, reply) => {

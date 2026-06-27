@@ -78,6 +78,15 @@ pnpm dev
 - 管理员任务列表与任务详情 API
 - 管理员任务列表与任务详情页面
 
+## 阶段 5 已实现
+
+- `waiting_for_input` / `waiting_for_auth` 状态流
+- 管理员提交输入并恢复任务执行
+- Source 认证模式配置与认证输入提交
+- 周期任务创建、更新、暂停、恢复
+- Worker 定时触发周期任务执行
+- Source 执行并发锁与最小间隔约束
+
 ## 管理员初始化
 
 默认从 `.env` 读取：
@@ -112,3 +121,4 @@ pnpm --filter @podcast-hub/api test
 - `docs/stage-2.md`
 - `docs/stage-3.md`
 - `docs/stage-4.md`
+- `docs/stage-5.md`
