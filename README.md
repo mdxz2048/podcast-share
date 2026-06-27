@@ -87,6 +87,15 @@ pnpm dev
 - Worker 定时触发周期任务执行
 - Source 执行并发锁与最小间隔约束
 
+## 阶段 6 已实现
+
+- 节目可见规则闭环（`all_registered_users` / `audience_groups` / `specific_users`）
+- 用户节目与 RSS/媒体访问按可见规则实时收敛
+- 管理员用户类别管理（创建、更新、删除）
+- 管理员用户与类别关系管理（加入、移出）
+- 节目可见授权规则配置 API 与管理页面
+- 管理员审计日志记录与查询 API
+
 ## 管理员初始化
 
 默认从 `.env` 读取：
@@ -122,3 +131,4 @@ pnpm --filter @podcast-hub/api test
 - `docs/stage-3.md`
 - `docs/stage-4.md`
 - `docs/stage-5.md`
+- `docs/stage-6.md`

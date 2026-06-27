@@ -13,6 +13,9 @@ import { adminConnectorRoutes } from "./routes/admin-connectors.js";
 import { adminSourceRoutes } from "./routes/admin-sources.js";
 import { adminJobRoutes } from "./routes/admin-jobs.js";
 import { internalScheduleRoutes } from "./routes/internal-schedules.js";
+import { adminAudienceGroupRoutes } from "./routes/admin-audience-groups.js";
+import { adminUserRoutes } from "./routes/admin-users.js";
+import { adminAuditLogRoutes } from "./routes/admin-audit-logs.js";
 
 export function buildApp() {
   const app = Fastify({ logger: true });
@@ -38,6 +41,9 @@ export function buildApp() {
   app.register(adminConnectorRoutes);
   app.register(adminSourceRoutes);
   app.register(adminJobRoutes);
+  app.register(adminAudienceGroupRoutes);
+  app.register(adminUserRoutes);
+  app.register(adminAuditLogRoutes);
   app.register(internalScheduleRoutes);
 
   app.get("/health", async () => ({ ok: true }));

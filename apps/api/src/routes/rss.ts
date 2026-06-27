@@ -229,7 +229,26 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
        where rfp.rss_feed_id = $1
          and p.publish_status = 'published'
          and p.is_archived = false
-         and p.visibility_mode = 'all_registered_users'
+         and (
+           p.visibility_mode = 'all_registered_users'
+           or (
+             p.visibility_mode = 'audience_groups'
+             and exists (
+               select 1
+               from program_audience_groups pag
+               join user_audience_groups uag on uag.audience_group_id = pag.audience_group_id
+               where pag.program_id = p.id and uag.user_id = $2
+             )
+           )
+           or (
+             p.visibility_mode = 'specific_users'
+             and exists (
+               select 1
+               from program_user_grants pug
+               where pug.program_id = p.id and pug.user_id = $2
+             )
+           )
+         )
          and e.is_published = true
          and e.is_hidden = false
          and u.email_verified_at is not null`,
@@ -272,6 +291,26 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
          where rf.token_hash = $1
            and rf.status = 'active'
            and rf.revoked_at is null
+           and (
+             p.visibility_mode = 'all_registered_users'
+             or (
+               p.visibility_mode = 'audience_groups'
+               and exists (
+                 select 1
+                 from program_audience_groups pag
+                 join user_audience_groups uag on uag.audience_group_id = pag.audience_group_id
+                 where pag.program_id = p.id and uag.user_id = rf.user_id
+               )
+             )
+             or (
+               p.visibility_mode = 'specific_users'
+               and exists (
+                 select 1
+                 from program_user_grants pug
+                 where pug.program_id = p.id and pug.user_id = rf.user_id
+               )
+             )
+           )
            and u.email_verified_at is not null`,
         [tokenHash, episodeId]
       );
@@ -281,7 +320,7 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
       }
 
       const row = mediaRes.rows[0];
-      if (row.visibility_mode !== "all_registered_users" || row.publish_status !== "published" || row.is_archived || !row.is_published || row.is_hidden) {
+      if (row.publish_status !== "published" || row.is_archived || !row.is_published || row.is_hidden) {
         return reply.status(404).send({ message: "媒体不存在" });
       }
 

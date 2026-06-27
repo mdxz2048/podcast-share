@@ -1,12 +1,6 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
-
-function canUserSeeProgram(user: { email_verified_at: string | null }, visibilityMode: string): boolean {
-  if (!user.email_verified_at) {
-    return false;
-  }
-  return visibilityMode === "all_registered_users";
-}
+import { canUserAccessProgram } from "../services/program-visibility.js";
 
 export async function programRoutes(app: FastifyInstance): Promise<void> {
   app.get("/programs", async (request, reply) => {
@@ -26,16 +20,35 @@ export async function programRoutes(app: FastifyInstance): Promise<void> {
        from programs p
        join episodes e on e.program_id = p.id and e.is_published = true and e.is_hidden = false
        join media_assets m on m.episode_id = e.id and m.status = 'ready'
-       where p.publish_status = 'published' and p.is_archived = false
+       where p.publish_status = 'published'
+         and p.is_archived = false
+         and (
+           p.visibility_mode = 'all_registered_users'
+           or (
+             p.visibility_mode = 'audience_groups'
+             and exists (
+               select 1
+               from program_audience_groups pag
+               join user_audience_groups uag on uag.audience_group_id = pag.audience_group_id
+               where pag.program_id = p.id and uag.user_id = $1
+             )
+           )
+           or (
+             p.visibility_mode = 'specific_users'
+             and exists (
+               select 1
+               from program_user_grants pug
+               where pug.program_id = p.id and pug.user_id = $1
+             )
+           )
+         )
        group by p.id
        order by max(e.published_at) desc`,
-      []
+      [request.user.id]
     );
 
-    const visible = rows.rows.filter((row) => canUserSeeProgram(userRes.rows[0], row.visibility_mode ?? "all_registered_users"));
-
     return {
-      items: visible.map((row) => ({
+      items: rows.rows.map((row) => ({
         id: row.id,
         title: row.title,
         description: row.description,
@@ -60,7 +73,7 @@ export async function programRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const programRes = await app.pg.query(
-      `select p.id, p.title, p.description, p.cover_image_url, p.updated_at, p.visibility_mode
+      `select p.id, p.title, p.description, p.cover_image_url, p.updated_at
        from programs p
        where p.id = $1 and p.publish_status = 'published' and p.is_archived = false`,
       [programId]
@@ -71,7 +84,8 @@ export async function programRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const program = programRes.rows[0];
-    if (!canUserSeeProgram(userRes.rows[0], program.visibility_mode)) {
+    const canAccess = await canUserAccessProgram(app, request.user.id, programId);
+    if (!canAccess) {
       return reply.status(403).send({ message: "无权限访问该节目" });
     }
 
@@ -96,7 +110,7 @@ export async function programRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const programRes = await app.pg.query(
-      `select id, visibility_mode from programs
+      `select id from programs
        where id = $1 and publish_status = 'published' and is_archived = false`,
       [programId]
     );
@@ -104,7 +118,8 @@ export async function programRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(404).send({ message: "节目不存在" });
     }
 
-    if (!canUserSeeProgram(userRes.rows[0], programRes.rows[0].visibility_mode)) {
+    const canAccess = await canUserAccessProgram(app, request.user.id, programId);
+    if (!canAccess) {
       return reply.status(403).send({ message: "无权限访问该节目" });
     }
 
@@ -139,8 +154,8 @@ export async function programRoutes(app: FastifyInstance): Promise<void> {
     const { episodeId } = z.object({ episodeId: z.string().uuid() }).parse(request.params);
 
     const rowRes = await app.pg.query(
-      `select e.id, e.title, e.description, e.published_at, e.duration_seconds,
-              p.visibility_mode, p.publish_status, p.is_archived
+            `select e.id, e.title, e.description, e.published_at, e.duration_seconds,
+              p.id as program_id, p.publish_status, p.is_archived
        from episodes e
        join programs p on p.id = e.program_id
        where e.id = $1 and e.is_published = true and e.is_hidden = false`,
@@ -157,7 +172,8 @@ export async function programRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const row = rowRes.rows[0];
-    if (row.publish_status !== "published" || row.is_archived || !canUserSeeProgram(userRes.rows[0], row.visibility_mode)) {
+    const canAccess = await canUserAccessProgram(app, request.user.id, row.program_id);
+    if (row.publish_status !== "published" || row.is_archived || !canAccess) {
       return reply.status(403).send({ message: "无权限访问该单集" });
     }
 

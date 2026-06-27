@@ -1,7 +1,8 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { writeAdminAuditLog } from "../services/admin-audit.js";
 
-function assertAdmin(request: { user: { isAdmin: boolean } | null }, reply: any): boolean {
+function assertAdmin(request: { user: { id: string; isAdmin: boolean } | null }, reply: any): request is { user: { id: string; isAdmin: boolean } } {
   if (!request.user || !request.user.isAdmin) {
     reply.status(401).send({ message: "未登录管理员" });
     return false;
@@ -10,6 +11,44 @@ function assertAdmin(request: { user: { isAdmin: boolean } | null }, reply: any)
 }
 
 export async function adminProgramRoutes(app: FastifyInstance): Promise<void> {
+  app.get("/admin/programs/:programId/visibility", async (request, reply) => {
+    if (!assertAdmin(request, reply)) {
+      return;
+    }
+
+    const { programId } = z.object({ programId: z.string().uuid() }).parse(request.params);
+
+    const programRes = await app.pg.query("select id, visibility_mode from programs where id = $1", [programId]);
+    if ((programRes.rowCount ?? 0) === 0) {
+      return reply.status(404).send({ message: "节目不存在" });
+    }
+
+    const groupRes = await app.pg.query(
+      `select pag.audience_group_id, ag.name
+       from program_audience_groups pag
+       join audience_groups ag on ag.id = pag.audience_group_id
+       where pag.program_id = $1
+       order by ag.name asc`,
+      [programId]
+    );
+
+    const userRes = await app.pg.query(
+      `select pug.user_id, u.email
+       from program_user_grants pug
+       join users u on u.id = pug.user_id
+       where pug.program_id = $1
+       order by u.email asc`,
+      [programId]
+    );
+
+    return {
+      programId,
+      visibilityMode: programRes.rows[0].visibility_mode,
+      audienceGroups: groupRes.rows.map((row) => ({ id: row.audience_group_id, name: row.name })),
+      users: userRes.rows.map((row) => ({ id: row.user_id, email: row.email }))
+    };
+  });
+
   app.get("/admin/programs", async (request, reply) => {
     if (!assertAdmin(request, reply)) {
       return;
@@ -104,6 +143,17 @@ export async function adminProgramRoutes(app: FastifyInstance): Promise<void> {
       [body.title ?? null, body.description ?? null, body.publishStatus ?? null, body.visibilityMode ?? null, programId]
     );
 
+    if (body.visibilityMode === "closed" || body.visibilityMode === "all_registered_users") {
+      await app.pg.query("delete from program_audience_groups where program_id = $1", [programId]);
+      await app.pg.query("delete from program_user_grants where program_id = $1", [programId]);
+    }
+
+    await writeAdminAuditLog(app, request.user.id, "program.updated", "program", programId, {
+      title: body.title ?? null,
+      publishStatus: body.publishStatus ?? null,
+      visibilityMode: body.visibilityMode ?? null
+    });
+
     return { message: "节目已更新" };
   });
 
@@ -119,6 +169,10 @@ export async function adminProgramRoutes(app: FastifyInstance): Promise<void> {
        where id = $1`,
       [programId]
     );
+
+    await app.pg.query("delete from program_audience_groups where program_id = $1", [programId]);
+    await app.pg.query("delete from program_user_grants where program_id = $1", [programId]);
+    await writeAdminAuditLog(app, request.user.id, "program.opened", "program", programId, {});
 
     return { message: "节目已开放" };
   });
@@ -136,6 +190,10 @@ export async function adminProgramRoutes(app: FastifyInstance): Promise<void> {
       [programId]
     );
 
+    await app.pg.query("delete from program_audience_groups where program_id = $1", [programId]);
+    await app.pg.query("delete from program_user_grants where program_id = $1", [programId]);
+    await writeAdminAuditLog(app, request.user.id, "program.closed", "program", programId, {});
+
     return { message: "节目已关闭" };
   });
 
@@ -147,11 +205,79 @@ export async function adminProgramRoutes(app: FastifyInstance): Promise<void> {
     const { programId } = z.object({ programId: z.string().uuid() }).parse(request.params);
     const body = z
       .object({
-        visibilityMode: z.enum(["closed", "all_registered_users", "audience_groups", "specific_users"])
+        visibilityMode: z.enum(["closed", "all_registered_users", "audience_groups", "specific_users"]),
+        audienceGroupIds: z.array(z.string().uuid()).optional(),
+        userIds: z.array(z.string().uuid()).optional()
       })
       .parse(request.body);
 
-    await app.pg.query("update programs set visibility_mode = $1, updated_at = now() where id = $2", [body.visibilityMode, programId]);
+    const exists = await app.pg.query("select id from programs where id = $1", [programId]);
+    if ((exists.rowCount ?? 0) === 0) {
+      return reply.status(404).send({ message: "节目不存在" });
+    }
+
+    const audienceGroupIds = Array.from(new Set(body.audienceGroupIds ?? []));
+    const userIds = Array.from(new Set(body.userIds ?? []));
+
+    if (body.visibilityMode === "audience_groups") {
+      if (audienceGroupIds.length === 0) {
+        return reply.status(400).send({ message: "audience_groups 模式需要至少一个用户类别" });
+      }
+
+      const groupsRes = await app.pg.query("select id from audience_groups where id = any($1::uuid[])", [audienceGroupIds]);
+      if ((groupsRes.rowCount ?? 0) !== audienceGroupIds.length) {
+        return reply.status(400).send({ message: "存在无效的用户类别 ID" });
+      }
+    }
+
+    if (body.visibilityMode === "specific_users") {
+      if (userIds.length === 0) {
+        return reply.status(400).send({ message: "specific_users 模式需要至少一个用户" });
+      }
+
+      const usersRes = await app.pg.query("select id from users where id = any($1::uuid[])", [userIds]);
+      if ((usersRes.rowCount ?? 0) !== userIds.length) {
+        return reply.status(400).send({ message: "存在无效的用户 ID" });
+      }
+    }
+
+    await app.pg.query("begin");
+    try {
+      await app.pg.query("update programs set visibility_mode = $1, updated_at = now() where id = $2", [body.visibilityMode, programId]);
+      await app.pg.query("delete from program_audience_groups where program_id = $1", [programId]);
+      await app.pg.query("delete from program_user_grants where program_id = $1", [programId]);
+
+      if (body.visibilityMode === "audience_groups") {
+        for (const groupId of audienceGroupIds) {
+          await app.pg.query(
+            `insert into program_audience_groups (program_id, audience_group_id, created_at)
+             values ($1, $2, now())`,
+            [programId, groupId]
+          );
+        }
+      }
+
+      if (body.visibilityMode === "specific_users") {
+        for (const userId of userIds) {
+          await app.pg.query(
+            `insert into program_user_grants (program_id, user_id, created_at)
+             values ($1, $2, now())`,
+            [programId, userId]
+          );
+        }
+      }
+
+      await app.pg.query("commit");
+    } catch (error) {
+      await app.pg.query("rollback");
+      throw error;
+    }
+
+    await writeAdminAuditLog(app, request.user.id, "program.visibility_updated", "program", programId, {
+      visibilityMode: body.visibilityMode,
+      audienceGroupIds,
+      userIds
+    });
 
     return { message: "可见范围已更新" };
   });
