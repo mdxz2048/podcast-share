@@ -1,0 +1,27 @@
+schema_version: 1
+name: fixture-program-downloader
+display_name: Fixture 节目下载器
+version: 1.0.0
+description: 仅用于本地测试全链路，不访问真实外部来源。
+runtime:
+  language: python
+  entrypoint: src/connector.py
+run_modes:
+  manual: true
+  scheduled: true
+schedule:
+  minimum_interval_minutes: 60
+  recommended_interval_minutes: 360
+authentication:
+  modes:
+    - none
+  unattended_supported: true
+inputs:
+  - key: source_name
+    label: 来源名称
+    type: text
+    required: true
+    default: fixture-source
+output:
+  protocol: podcast-hub-jsonl-v1
+  media_root: /work/output/media

@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-white text-ink font-sans;
+}
+
+main {
+  @apply mx-auto max-w-5xl px-6 py-10;
+}
+
+.card {
+  @apply rounded-xl border border-line bg-white p-6;
+}
+
+.button {
+  @apply rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition hover:opacity-90;
+}
+
+.input {
+  @apply w-full rounded-lg border border-line px-3 py-2 text-sm outline-none focus:border-accent;
+}

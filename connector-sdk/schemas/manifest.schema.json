@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://podcast-hub.local/schemas/manifest.schema.json",
+  "title": "Podcast Hub Connector Manifest",
+  "type": "object",
+  "required": ["schema_version", "name", "display_name", "version", "runtime", "run_modes", "authentication", "inputs", "output"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "name": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+    "display_name": { "type": "string" },
+    "version": { "type": "string" },
+    "description": { "type": "string" },
+    "runtime": {
+      "type": "object",
+      "required": ["language", "entrypoint"],
+      "properties": {
+        "language": { "type": "string", "const": "python" },
+        "entrypoint": { "type": "string" }
+      }
+    },
+    "run_modes": {
+      "type": "object",
+      "required": ["manual", "scheduled"],
+      "properties": {
+        "manual": { "type": "boolean" },
+        "scheduled": { "type": "boolean" }
+      }
+    },
+    "schedule": {
+      "type": "object",
+      "properties": {
+        "minimum_interval_minutes": { "type": "integer", "minimum": 1 },
+        "recommended_interval_minutes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "authentication": {
+      "type": "object",
+      "required": ["modes", "unattended_supported"],
+      "properties": {
+        "modes": { "type": "array", "items": { "type": "string" } },
+        "unattended_supported": { "type": "boolean" }
+      }
+    },
+    "inputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "label", "type", "required"],
+        "properties": {
+          "key": { "type": "string" },
+          "label": { "type": "string" },
+          "type": { "type": "string" },
+          "required": { "type": "boolean" },
+          "default": {}
+        }
+      }
+    },
+    "secrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "label", "required"],
+        "properties": {
+          "key": { "type": "string" },
+          "label": { "type": "string" },
+          "required": { "type": "boolean" }
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "required": ["protocol", "media_root"],
+      "properties": {
+        "protocol": { "type": "string", "const": "podcast-hub-jsonl-v1" },
+        "media_root": { "type": "string" }
+      }
+    }
+  }
+}
