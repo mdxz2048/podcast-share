@@ -62,6 +62,19 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
     await load();
   }
 
+  async function runNow() {
+    const res = await fetch(`${apiBase}/admin/sources/${params.id}/run`, {
+      method: "POST",
+      credentials: "include"
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      setMessage(json.message ?? "运行失败");
+      return;
+    }
+    setMessage(`任务已执行，状态：${json.status}，Job ID: ${json.jobId}`);
+  }
+
   return (
     <section className="space-y-4">
       <h1 className="text-2xl font-semibold">Source 配置</h1>
@@ -80,6 +93,9 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
         <div className="flex gap-3">
           <button className="button" onClick={save}>
             保存配置
+          </button>
+          <button className="button" onClick={runNow}>
+            立即运行
           </button>
           <button className="button" onClick={() => toggleEnabled(!enabled)}>
             {enabled ? "禁用 Source" : "启用 Source"}

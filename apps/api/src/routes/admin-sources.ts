@@ -1,6 +1,9 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { encryptSecret } from "../utils/secrets.js";
+import { decryptSecret, encryptSecret } from "../utils/secrets.js";
+import { env } from "../config.js";
+import { applyRunnerEvents } from "../services/import-processing.js";
+import { assertTransition, type JobStatus } from "../utils/job-state.js";
 
 function assertAdmin(request: { user: { id: string; isAdmin: boolean } | null }, reply: any): request is { user: { id: string; isAdmin: boolean } } {
   if (!request.user || !request.user.isAdmin) {
@@ -37,6 +40,18 @@ function splitConfigByManifest(manifest: ManifestLike, inputConfig: Record<strin
     inputs: normalizedInputs,
     secrets: normalizedSecrets
   };
+}
+
+async function transitionJobStatus(app: FastifyInstance, jobId: string, to: JobStatus) {
+  const currentRes = await app.pg.query("select status from import_jobs where id = $1", [jobId]);
+  if ((currentRes.rowCount ?? 0) === 0) {
+    throw new Error("job not found");
+  }
+
+  const from = currentRes.rows[0].status as JobStatus;
+  assertTransition(from, to);
+
+  await app.pg.query("update import_jobs set status = $1, updated_at = now() where id = $2", [to, jobId]);
 }
 
 export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
@@ -316,6 +331,177 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
     const { sourceId } = z.object({ sourceId: z.string().uuid() }).parse(request.params);
     await app.pg.query("update connector_sources set enabled = true, updated_at = now() where id = $1", [sourceId]);
     return { message: "Source 已启用" };
+  });
+
+  app.post("/admin/sources/:sourceId/run", async (request, reply) => {
+    if (!assertAdmin(request, reply)) {
+      return;
+    }
+
+    const { sourceId } = z.object({ sourceId: z.string().uuid() }).parse(request.params);
+
+    const sourceRes = await app.pg.query(
+      `select s.id, s.name, s.enabled, s.auth_status,
+              s.connector_id, s.connector_version_id,
+              c.name as connector_name,
+              cv.version as connector_version,
+              cv.package_path,
+              cv.manifest_json,
+              csc.config_json
+       from connector_sources s
+       join connectors c on c.id = s.connector_id
+       join connector_versions cv on cv.id = s.connector_version_id
+       left join connector_source_configs csc on csc.source_id = s.id
+       where s.id = $1`,
+      [sourceId]
+    );
+
+    if ((sourceRes.rowCount ?? 0) === 0) {
+      return reply.status(404).send({ message: "Source 不存在" });
+    }
+
+    const source = sourceRes.rows[0];
+
+    const runningRes = await app.pg.query(
+      `select id from import_jobs
+       where source_id = $1 and status in ('running', 'waiting_for_input', 'waiting_for_auth')
+       limit 1`,
+      [sourceId]
+    );
+    if ((runningRes.rowCount ?? 0) > 0) {
+      return reply.status(409).send({ message: "该 Source 已有运行中的任务" });
+    }
+
+    const secretRows = await app.pg.query(
+      `select ssb.secret_key, sr.cipher_text
+       from source_secret_bindings ssb
+       join secret_records sr on sr.id = ssb.secret_record_id
+       where ssb.source_id = $1`,
+      [sourceId]
+    );
+
+    const secretConfig: Record<string, string> = {};
+    for (const row of secretRows.rows) {
+      secretConfig[row.secret_key] = decryptSecret(row.cipher_text);
+    }
+
+    const inputConfig = (source.config_json ?? {}) as Record<string, unknown>;
+
+    const inputSummary = {
+      keys: Object.keys(inputConfig),
+      sourceName: source.name
+    };
+    const authSummary = {
+      status: source.auth_status,
+      secretKeys: Object.keys(secretConfig)
+    };
+
+    const jobRes = await app.pg.query(
+      `insert into import_jobs (
+          id, source_id, connector_id, connector_version_id, trigger_type, status,
+          started_at, input_summary_json, auth_summary_json,
+          created_by, created_at, updated_at
+       ) values (
+          gen_random_uuid(), $1, $2, $3, 'manual', 'queued',
+          now(), $4::jsonb, $5::jsonb,
+          $6, now(), now()
+       ) returning id`,
+      [sourceId, source.connector_id, source.connector_version_id, JSON.stringify(inputSummary), JSON.stringify(authSummary), request.user.id]
+    );
+
+    const jobId = jobRes.rows[0].id;
+
+    await app.pg.query(
+      `insert into import_job_inputs (id, job_id, input_summary_json, created_at)
+       values (gen_random_uuid(), $1, $2::jsonb, now())`,
+      [jobId, JSON.stringify({ inputSummary, authSummary })]
+    );
+
+    try {
+      await transitionJobStatus(app, jobId, "running");
+    } catch (error) {
+      return reply.status(500).send({ message: error instanceof Error ? error.message : "任务状态更新失败" });
+    }
+
+    const runnerResponse = await fetch(`${env.RUNNER_BASE_URL}/internal/run-import`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jobId,
+        packagePath: source.package_path,
+        manifest: source.manifest_json,
+        inputConfig,
+        secretConfig
+      })
+    });
+
+    const runnerJson = await runnerResponse.json();
+    if (!runnerResponse.ok) {
+      await app.pg.query(
+        `update import_jobs
+         set status = 'failed', ended_at = now(), error_summary = $1, updated_at = now()
+         where id = $2`,
+        [runnerJson.message ?? "runner 执行失败", jobId]
+      );
+      await app.pg.query("update connector_sources set last_job_status = 'failed', updated_at = now() where id = $1", [sourceId]);
+      return reply.status(502).send({ message: "Runner 执行失败", jobId });
+    }
+
+    const events = Array.isArray(runnerJson.events) ? (runnerJson.events as Array<Record<string, unknown>>) : [];
+    const importSummary = await applyRunnerEvents(app, jobId, sourceId, events);
+
+    const finalStatus: JobStatus = runnerJson.status === "completed" ? "completed" : "failed";
+    await app.pg.query(
+      `update import_jobs
+       set status = $1,
+           ended_at = now(),
+           output_summary_json = $2::jsonb,
+           discovered_programs = $3,
+           discovered_episodes = $4,
+           imported_media = $5,
+           failed_count = $6,
+           error_summary = $7,
+           updated_at = now()
+       where id = $8`,
+      [
+        finalStatus,
+        JSON.stringify({ runnerStatus: runnerJson.status, copiedMediaCount: runnerJson.copiedMediaCount ?? 0 }),
+        importSummary.programs,
+        importSummary.episodes,
+        importSummary.media,
+        importSummary.failed,
+        runnerJson.stderr ?? null,
+        jobId
+      ]
+    );
+
+    await app.pg.query(
+      `insert into import_job_outputs (id, job_id, output_summary_json, created_at)
+       values (gen_random_uuid(), $1, $2::jsonb, now())`,
+      [
+        jobId,
+        JSON.stringify({
+          runnerStatus: runnerJson.status,
+          importSummary
+        })
+      ]
+    );
+
+    await app.pg.query(
+      `update connector_sources
+       set last_job_status = $1,
+           last_success_sync_at = case when $1 = 'completed' then now() else last_success_sync_at end,
+           updated_at = now()
+       where id = $2`,
+      [finalStatus, sourceId]
+    );
+
+    return {
+      message: finalStatus === "completed" ? "任务完成" : "任务失败",
+      jobId,
+      status: finalStatus,
+      summary: importSummary
+    };
   });
 
   app.post("/admin/sources/:sourceId/disable", async (request, reply) => {

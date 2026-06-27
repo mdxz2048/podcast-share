@@ -69,6 +69,15 @@ pnpm dev
 - Secret 加密存储（AES-256-GCM）
 - 管理员端 Connector 与 Source 页面基础交互
 
+## 阶段 4 已实现
+
+- Runner 独立服务与受控执行入口
+- Source 手动运行任务
+- Import Job 状态机与任务事件日志
+- JSONL 输出导入 Program / Episode / Media
+- 管理员任务列表与任务详情 API
+- 管理员任务列表与任务详情页面
+
 ## 管理员初始化
 
 默认从 `.env` 读取：
@@ -102,3 +111,4 @@ pnpm --filter @podcast-hub/api test
 - `docs/stage-1.md`
 - `docs/stage-2.md`
 - `docs/stage-3.md`
+- `docs/stage-4.md`

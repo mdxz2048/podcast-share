@@ -4,12 +4,19 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "echo 'runner tests pending'"
   },
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "fastify": "^5.0.0",
+    "zod": "^3.23.8"
+  },
   "devDependencies": {
+    "@types/adm-zip": "^0.5.7",
+    "@types/node": "^22.7.4",
     "tsx": "^4.19.1",
     "typescript": "^5.6.3"
   }

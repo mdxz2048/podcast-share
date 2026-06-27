@@ -20,6 +20,8 @@ services:
       - ../..:/workspace
     env_file:
       - ../../.env
+    environment:
+      RUNNER_BASE_URL: http://runner:4300
     ports:
       - "4000:4000"
     depends_on:
@@ -47,6 +49,8 @@ services:
       - ../..:/workspace
     env_file:
       - ../../.env
+    ports:
+      - "4300:4300"
     depends_on:
       - redis
       - postgres

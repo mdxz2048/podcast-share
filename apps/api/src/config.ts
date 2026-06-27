@@ -7,6 +7,7 @@ const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   API_BASE_URL: z.string().url().default("http://localhost:4000"),
   APP_BASE_URL: z.string().url().default("http://localhost:3000"),
+  RUNNER_BASE_URL: z.string().url().default("http://localhost:4300"),
   DATABASE_URL: z.string().min(1),
   MEDIA_LOCAL_ROOT: z.string().default("storage/media"),
   MAILPIT_SMTP_HOST: z.string().default("mailpit"),

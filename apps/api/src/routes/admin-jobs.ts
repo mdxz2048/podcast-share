@@ -1,0 +1,187 @@
+import { FastifyInstance } from "fastify";
+import { z } from "zod";
+
+function assertAdmin(request: { user: { isAdmin: boolean } | null }, reply: any): boolean {
+  if (!request.user || !request.user.isAdmin) {
+    reply.status(401).send({ message: "未登录管理员" });
+    return false;
+  }
+  return true;
+}
+
+export async function adminJobRoutes(app: FastifyInstance): Promise<void> {
+  app.get("/admin/jobs", async (request, reply) => {
+    if (!assertAdmin(request, reply)) {
+      return;
+    }
+
+    const rows = await app.pg.query(
+      `select j.id, j.status, j.trigger_type, j.started_at, j.ended_at,
+              j.discovered_programs, j.discovered_episodes, j.imported_media,
+              j.failed_count, j.error_summary, j.created_at,
+              s.id as source_id, s.name as source_name,
+              c.display_name as connector_display_name, cv.version as connector_version
+       from import_jobs j
+       join connector_sources s on s.id = j.source_id
+       join connectors c on c.id = j.connector_id
+       join connector_versions cv on cv.id = j.connector_version_id
+       order by j.created_at desc
+       limit 200`
+    );
+
+    return {
+      items: rows.rows.map((row) => ({
+        id: row.id,
+        status: row.status,
+        triggerType: row.trigger_type,
+        startedAt: row.started_at,
+        endedAt: row.ended_at,
+        discoveredPrograms: row.discovered_programs,
+        discoveredEpisodes: row.discovered_episodes,
+        importedMedia: row.imported_media,
+        failedCount: row.failed_count,
+        errorSummary: row.error_summary,
+        createdAt: row.created_at,
+        source: {
+          id: row.source_id,
+          name: row.source_name
+        },
+        connector: {
+          displayName: row.connector_display_name,
+          version: row.connector_version
+        }
+      }))
+    };
+  });
+
+  app.get("/admin/jobs/:jobId", async (request, reply) => {
+    if (!assertAdmin(request, reply)) {
+      return;
+    }
+
+    const { jobId } = z.object({ jobId: z.string().uuid() }).parse(request.params);
+
+    const jobRes = await app.pg.query(
+      `select j.*, s.name as source_name, c.display_name as connector_display_name, cv.version as connector_version
+       from import_jobs j
+       join connector_sources s on s.id = j.source_id
+       join connectors c on c.id = j.connector_id
+       join connector_versions cv on cv.id = j.connector_version_id
+       where j.id = $1`,
+      [jobId]
+    );
+
+    if ((jobRes.rowCount ?? 0) === 0) {
+      return reply.status(404).send({ message: "任务不存在" });
+    }
+
+    const eventsRes = await app.pg.query(
+      `select event_type, level, message, payload_json, created_at
+       from import_job_events
+       where job_id = $1
+       order by created_at asc`,
+      [jobId]
+    );
+
+    const inputsRes = await app.pg.query(
+      `select input_summary_json, created_at
+       from import_job_inputs
+       where job_id = $1
+       order by created_at desc
+       limit 1`,
+      [jobId]
+    );
+
+    const outputsRes = await app.pg.query(
+      `select output_summary_json, created_at
+       from import_job_outputs
+       where job_id = $1
+       order by created_at desc
+       limit 1`,
+      [jobId]
+    );
+
+    const job = jobRes.rows[0];
+    return {
+      id: job.id,
+      status: job.status,
+      triggerType: job.trigger_type,
+      startedAt: job.started_at,
+      endedAt: job.ended_at,
+      sourceName: job.source_name,
+      connectorDisplayName: job.connector_display_name,
+      connectorVersion: job.connector_version,
+      inputSummary: job.input_summary_json,
+      authSummary: job.auth_summary_json,
+      outputSummary: job.output_summary_json,
+      discoveredPrograms: job.discovered_programs,
+      discoveredEpisodes: job.discovered_episodes,
+      importedMedia: job.imported_media,
+      failedCount: job.failed_count,
+      errorSummary: job.error_summary,
+      latestInputSnapshot: (inputsRes.rowCount ?? 0) > 0 ? inputsRes.rows[0] : null,
+      latestOutputSnapshot: (outputsRes.rowCount ?? 0) > 0 ? outputsRes.rows[0] : null,
+      events: eventsRes.rows
+    };
+  });
+
+  app.post("/admin/jobs/:jobId/cancel", async (request, reply) => {
+    if (!assertAdmin(request, reply)) {
+      return;
+    }
+
+    const { jobId } = z.object({ jobId: z.string().uuid() }).parse(request.params);
+
+    const jobRes = await app.pg.query("select status from import_jobs where id = $1", [jobId]);
+    if ((jobRes.rowCount ?? 0) === 0) {
+      return reply.status(404).send({ message: "任务不存在" });
+    }
+
+    const status = jobRes.rows[0].status as string;
+    if (!["queued", "running", "waiting_for_input", "waiting_for_auth"].includes(status)) {
+      return reply.status(400).send({ message: "当前状态不支持取消" });
+    }
+
+    await app.pg.query(
+      `update import_jobs
+       set status = 'cancelled', ended_at = now(), updated_at = now()
+       where id = $1`,
+      [jobId]
+    );
+
+    await app.pg.query(
+      `insert into import_job_events (id, job_id, event_type, level, message, payload_json, created_at)
+       values (gen_random_uuid(), $1, 'cancelled', 'info', 'job cancelled by admin', '{}'::jsonb, now())`,
+      [jobId]
+    );
+
+    return { message: "任务已取消" };
+  });
+
+  app.post("/admin/jobs/:jobId/submit-input", async (request, reply) => {
+    if (!assertAdmin(request, reply)) {
+      return;
+    }
+
+    const { jobId } = z.object({ jobId: z.string().uuid() }).parse(request.params);
+    const body = z.object({ input: z.record(z.any()) }).parse(request.body);
+
+    const jobRes = await app.pg.query("select status from import_jobs where id = $1", [jobId]);
+    if ((jobRes.rowCount ?? 0) === 0) {
+      return reply.status(404).send({ message: "任务不存在" });
+    }
+
+    const status = jobRes.rows[0].status as string;
+    if (!['waiting_for_input', 'waiting_for_auth'].includes(status)) {
+      return reply.status(400).send({ message: "任务当前不需要输入" });
+    }
+
+    await app.pg.query(
+      `insert into import_job_events (id, job_id, event_type, level, message, payload_json, created_at)
+       values (gen_random_uuid(), $1, 'input_submitted', 'info', 'admin submitted input', $2::jsonb, now())`,
+      [jobId, JSON.stringify({ keys: Object.keys(body.input) })]
+    );
+
+    return { message: "输入已记录，阶段 5 将接入任务恢复执行" };
+  });
+}
