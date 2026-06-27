@@ -1,4 +1,5 @@
 import { FastifyInstance } from "fastify";
+import fp from "fastify-plugin";
 import { pool } from "../db/pool.js";
 
 declare module "fastify" {
@@ -7,9 +8,13 @@ declare module "fastify" {
   }
 }
 
-export async function pgPlugin(app: FastifyInstance): Promise<void> {
+async function pgPluginImpl(app: FastifyInstance): Promise<void> {
   app.decorate("pg", pool);
   app.addHook("onClose", async () => {
     await pool.end();
   });
 }
+
+export const pgPlugin = fp(pgPluginImpl, {
+  name: "pg-plugin"
+});

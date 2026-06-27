@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
+const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
 
 type Version = {
   id: string;
@@ -55,6 +55,22 @@ export default function AdminConnectorDetailPage({ params }: { params: { id: str
     await load();
   }
 
+  async function removeConnector() {
+    if (!confirm(`确认删除 Connector「${name || params.id}」吗？该操作会同时删除关联 Source。`)) {
+      return;
+    }
+
+    const res = await fetch(`${apiBase}/admin/connectors/${params.id}`, {
+      method: "DELETE",
+      credentials: "include"
+    });
+    const json = await res.json();
+    setMessage(json.message ?? (res.ok ? "已删除" : "操作失败"));
+    if (res.ok) {
+      window.location.href = "/admin/connectors";
+    }
+  }
+
   return (
     <section className="space-y-4">
       <h1 className="text-2xl font-semibold">Connector 详情</h1>
@@ -76,9 +92,14 @@ export default function AdminConnectorDetailPage({ params }: { params: { id: str
         ))}
       </div>
 
-      <button className="button" onClick={disable}>
-        禁用 Connector
-      </button>
+      <div className="flex gap-3">
+        <button className="button" onClick={disable}>
+          禁用 Connector
+        </button>
+        <button className="button-secondary" onClick={removeConnector}>
+          删除 Connector
+        </button>
+      </div>
     </section>
   );
 }

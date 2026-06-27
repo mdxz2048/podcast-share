@@ -16,8 +16,17 @@ export default function AdminHomePage() {
         <a className="card text-sm text-muted" href="/admin/connectors">
           Connector 管理
         </a>
+        <a className="card text-sm text-muted" href="/admin/connectors/upload">
+          上传 Connector ZIP
+        </a>
+        <a className="card text-sm text-muted" href="/admin/connectors/packaging-guide">
+          Connector 打包规范模板
+        </a>
         <a className="card text-sm text-muted" href="/admin/sources">
           Source 管理
+        </a>
+        <a className="card text-sm text-muted" href="/admin/jobs">
+          任务列表
         </a>
       </div>
     </section>

@@ -37,6 +37,7 @@ async function upsertProgram(app: FastifyInstance, sourceId: string, event: Runn
         'published', 'closed', now(), now()
      )
      on conflict (source_id, external_program_id)
+     where source_id is not null and external_program_id is not null
      do update set
        title = excluded.title,
        description = excluded.description,

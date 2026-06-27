@@ -1,0 +1,41 @@
+schema_version: 1
+name: duoting-telegram-downloader
+display_name: 多听 Telegram Session 下载器
+version: 1.0.0
+description: 封装 duoting 脚本，支持 Telegram session 文件注入与音频导入。
+runtime:
+  language: python
+  entrypoint: src/connector.py
+run_modes:
+  manual: true
+  scheduled: true
+schedule:
+  minimum_interval_minutes: 60
+  recommended_interval_minutes: 360
+authentication:
+  modes:
+    - telegram_session
+  unattended_supported: true
+inputs:
+  - key: source_name
+    label: 来源名称
+    type: text
+    required: true
+    default: duoting-source
+  - key: program_title
+    label: 节目标题
+    type: text
+    required: true
+    default: 多听节目
+  - key: script_path
+    label: 脚本路径（相对 connector 根目录）
+    type: text
+    required: true
+    default: scripts/duoting.py
+secrets:
+  - key: telegram_session_b64
+    label: Telegram session 文件（base64）
+    required: true
+output:
+  protocol: podcast-hub-jsonl-v1
+  media_root: /work/output/media

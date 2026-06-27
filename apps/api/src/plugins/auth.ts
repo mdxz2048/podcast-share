@@ -1,4 +1,5 @@
 import { FastifyInstance } from "fastify";
+import fp from "fastify-plugin";
 import { findSession } from "../services/session.js";
 
 declare module "fastify" {
@@ -12,7 +13,7 @@ declare module "fastify" {
   }
 }
 
-export async function authPlugin(app: FastifyInstance): Promise<void> {
+async function authPluginImpl(app: FastifyInstance): Promise<void> {
   app.decorateRequest("user", null);
 
   app.addHook("preHandler", async (request) => {
@@ -39,3 +40,7 @@ export async function authPlugin(app: FastifyInstance): Promise<void> {
     };
   });
 }
+
+export const authPlugin = fp(authPluginImpl, {
+  name: "auth-plugin"
+});

@@ -1,0 +1,39 @@
+schema_version: 1
+name: xet-manual-downloader
+display_name: XET 手动扫码下载器
+version: 1.0.0
+description: 封装 xet.py，适用于每次运行需扫码登录两次的手动导入场景。
+runtime:
+  language: python
+  entrypoint: src/connector.py
+run_modes:
+  manual: true
+  scheduled: false
+authentication:
+  modes:
+    - qr_interactive
+  unattended_supported: false
+inputs:
+  - key: source_name
+    label: 来源名称
+    type: text
+    required: true
+    default: xet-source
+  - key: program_title
+    label: 节目标题
+    type: text
+    required: true
+    default: XET 节目
+  - key: script_path
+    label: 脚本路径（相对 connector 根目录）
+    type: text
+    required: true
+    default: scripts/xet.py
+  - key: qr_confirmed
+    label: 已在外部终端完成本次扫码
+    type: boolean
+    required: false
+    default: false
+output:
+  protocol: podcast-hub-jsonl-v1
+  media_root: /work/output/media

@@ -18,7 +18,9 @@ const requestSchema = z.object({
 		})
 	}),
 	inputConfig: z.record(z.any()).default({}),
-	secretConfig: z.record(z.string()).default({})
+	secretConfig: z.record(z.string()).default({}),
+	eventCallbackUrl: z.string().url().optional(),
+	eventCallbackToken: z.string().optional()
 });
 
 type RunnerEvent = Record<string, unknown> & { __runnerMediaRoot?: string };
@@ -38,6 +40,56 @@ function parseJsonlLines(raw: string) {
 		}
 	}
 	return events;
+}
+
+async function runProcess(
+	command: string,
+	args: string[],
+	options: { cwd: string; env?: NodeJS.ProcessEnv }
+): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+	return new Promise((resolvePromise) => {
+		const child = spawn(command, args, {
+			cwd: options.cwd,
+			env: options.env
+		});
+
+		let stdout = "";
+		let stderr = "";
+
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk.toString();
+		});
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk.toString();
+		});
+
+		child.on("close", (code) => {
+			resolvePromise({ exitCode: code, stdout, stderr });
+		});
+	});
+}
+
+async function postRunnerEvent(
+	callbackUrl: string | undefined,
+	callbackToken: string | undefined,
+	event: { eventType: string; level?: string | null; message?: string | null; payload?: Record<string, unknown> }
+) {
+	if (!callbackUrl) {
+		return;
+	}
+
+	try {
+		await fetch(callbackUrl, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				...(callbackToken ? { "x-runner-token": callbackToken } : {})
+			},
+			body: JSON.stringify(event)
+		});
+	} catch {
+		// Ignore callback failures; final runner result still returns normally.
+	}
 }
 
 async function stageMediaFiles(jobId: string, events: RunnerEvent[]) {
@@ -99,9 +151,51 @@ app.post("/internal/run-import", async (request, reply) => {
 		}
 
 		const pythonCmd = process.env.RUNNER_PYTHON_CMD ?? "python3";
+		const requirementsPath = resolve(extractedDir, "requirements.lock");
+		const venvDir = resolve(tempDir, "venv");
+		const venvPython = resolve(venvDir, "bin/python3");
+		const venvPip = resolve(venvDir, "bin/pip3");
+
+		const venvCreate = await runProcess(pythonCmd, ["-m", "venv", venvDir], {
+			cwd: extractedDir,
+			env: process.env
+		});
+		if (venvCreate.exitCode !== 0) {
+			return reply.status(500).send({
+				status: "failed",
+				message: "创建 Python 虚拟环境失败",
+				stderr: venvCreate.stderr || null
+			});
+		}
+
+		const pipInstallTools = await runProcess(venvPython, ["-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], {
+			cwd: extractedDir,
+			env: process.env
+		});
+		if (pipInstallTools.exitCode !== 0) {
+			return reply.status(500).send({
+				status: "failed",
+				message: "初始化 Python 依赖环境失败",
+				stderr: pipInstallTools.stderr || null
+			});
+		}
+
+		if (existsSync(requirementsPath)) {
+			const pipInstallDeps = await runProcess(venvPip, ["install", "-r", requirementsPath], {
+				cwd: extractedDir,
+				env: process.env
+			});
+			if (pipInstallDeps.exitCode !== 0) {
+				return reply.status(500).send({
+					status: "failed",
+					message: "安装 connector 依赖失败",
+					stderr: pipInstallDeps.stderr || null
+				});
+			}
+		}
 
 		const runResult = await new Promise<{ exitCode: number | null; stdout: string; stderr: string }>((resolvePromise) => {
-			const child = spawn(pythonCmd, [entrypoint], {
+			const child = spawn(venvPython, [entrypoint], {
 				cwd: extractedDir,
 				env: {
 					...process.env,
@@ -113,15 +207,51 @@ app.post("/internal/run-import", async (request, reply) => {
 
 			let stdout = "";
 			let stderr = "";
+			let stdoutBuffer = "";
+			let stderrBuffer = "";
+
+			const flushBufferedLine = (channel: "stdout" | "stderr", line: string) => {
+				void postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, {
+					eventType: channel === "stdout" ? "runner_stdout" : "runner_stderr",
+					level: channel === "stdout" ? "info" : "warn",
+					message: line,
+					payload: { channel }
+				});
+			};
 
 			child.stdout.on("data", (chunk) => {
-				stdout += chunk.toString();
+				const text = chunk.toString();
+				stdout += text;
+				stdoutBuffer += text;
+				const lines = stdoutBuffer.split(/\r?\n/);
+				stdoutBuffer = lines.pop() ?? "";
+				for (const line of lines) {
+					if (line.trim()) {
+						flushBufferedLine("stdout", line);
+					}
+				}
 			});
+
 			child.stderr.on("data", (chunk) => {
-				stderr += chunk.toString();
+				const text = chunk.toString();
+				stderr += text;
+				stderrBuffer += text;
+				const lines = stderrBuffer.split(/\r?\n/);
+				stderrBuffer = lines.pop() ?? "";
+				for (const line of lines) {
+					if (line.trim()) {
+						flushBufferedLine("stderr", line);
+					}
+				}
 			});
 
 			child.on("close", (code) => {
+				if (stdoutBuffer.trim()) {
+					flushBufferedLine("stdout", stdoutBuffer.trim());
+				}
+				if (stderrBuffer.trim()) {
+					flushBufferedLine("stderr", stderrBuffer.trim());
+				}
 				resolvePromise({ exitCode: code, stdout, stderr });
 			});
 		});

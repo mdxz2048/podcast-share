@@ -1,11 +1,11 @@
 "use client";
 
 import { useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { Suspense, useState } from "react";
 
-const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
+const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
 
-export default function VerifyEmailPage() {
+function VerifyEmailContent() {
   const search = useSearchParams();
   const [message, setMessage] = useState("");
   const token = search.get("token") ?? "";
@@ -29,5 +29,13 @@ export default function VerifyEmailPage() {
       </button>
       {message ? <p className="text-sm text-muted">{message}</p> : null}
     </div>
+  );
+}
+
+export default function VerifyEmailPage() {
+  return (
+    <Suspense fallback={<div className="card mx-auto max-w-xl">加载中...</div>}>
+      <VerifyEmailContent />
+    </Suspense>
   );
 }

@@ -267,4 +267,20 @@ export async function adminConnectorRoutes(app: FastifyInstance): Promise<void> 
 
     return { message: "Connector 已禁用" };
   });
+
+  app.delete("/admin/connectors/:connectorId", async (request, reply) => {
+    if (!assertAdmin(request, reply)) {
+      return;
+    }
+
+    const { connectorId } = z.object({ connectorId: z.string().uuid() }).parse(request.params);
+
+    const connectorRes = await app.pg.query("select id from connectors where id = $1", [connectorId]);
+    if ((connectorRes.rowCount ?? 0) === 0) {
+      return reply.status(404).send({ message: "Connector 不存在" });
+    }
+
+    await app.pg.query("delete from connectors where id = $1", [connectorId]);
+    return { message: "Connector 已删除" };
+  });
 }

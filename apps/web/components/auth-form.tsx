@@ -1,16 +1,21 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useState } from "react";
+import type { Route } from "next";
 
 type Props = {
   endpoint: string;
   title: string;
   successMessage: string;
+  redirectTo?: Route;
+  redirectByRole?: boolean;
 };
 
-const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
+const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
 
-export function AuthForm({ endpoint, title, successMessage }: Props) {
+export function AuthForm({ endpoint, title, successMessage, redirectTo, redirectByRole }: Props) {
+  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState("");
@@ -32,6 +37,26 @@ export function AuthForm({ endpoint, title, successMessage }: Props) {
     if (!res.ok) {
       setMessage(json.message ?? "请求失败");
       setLoading(false);
+      return;
+    }
+
+    if (redirectByRole) {
+      try {
+        const adminRes = await fetch(`${apiBase}/admin/me`, { credentials: "include" });
+        if (adminRes.ok) {
+          router.replace("/admin");
+          return;
+        }
+      } catch {
+        // Fall back to default user redirect when role check fails.
+      }
+
+      router.replace("/my/rss");
+      return;
+    }
+
+    if (redirectTo) {
+      router.replace(redirectTo);
       return;
     }
 

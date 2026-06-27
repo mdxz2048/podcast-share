@@ -11,7 +11,7 @@ type Episode = {
   mediaStatus: string;
 };
 
-const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
+const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
 
 export default function ProgramDetailPage({ params }: { params: { id: string } }) {
   const [title, setTitle] = useState("节目详情");

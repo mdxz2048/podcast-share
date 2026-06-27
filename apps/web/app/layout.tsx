@@ -3,7 +3,7 @@ import "./globals.css";
 import { Nav } from "../components/nav";
 
 export const metadata: Metadata = {
-  title: "Podcast Hub",
+  title: "Podcast Hub 用户端",
   description: "私有播客管理与订阅平台"
 };
 

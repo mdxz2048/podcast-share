@@ -16,6 +16,7 @@ import { internalScheduleRoutes } from "./routes/internal-schedules.js";
 import { adminAudienceGroupRoutes } from "./routes/admin-audience-groups.js";
 import { adminUserRoutes } from "./routes/admin-users.js";
 import { adminAuditLogRoutes } from "./routes/admin-audit-logs.js";
+import { internalRunnerEventRoutes } from "./routes/internal-runner-events.js";
 
 export function buildApp() {
   const app = Fastify({ logger: true });
@@ -45,6 +46,7 @@ export function buildApp() {
   app.register(adminUserRoutes);
   app.register(adminAuditLogRoutes);
   app.register(internalScheduleRoutes);
+  app.register(internalRunnerEventRoutes);
 
   app.get("/health", async () => ({ ok: true }));
 

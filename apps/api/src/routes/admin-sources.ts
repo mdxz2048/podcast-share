@@ -608,4 +608,20 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
     await app.pg.query("update connector_sources set enabled = false, updated_at = now() where id = $1", [sourceId]);
     return { message: "Source 已禁用" };
   });
+
+  app.delete("/admin/sources/:sourceId", async (request, reply) => {
+    if (!assertAdmin(request, reply)) {
+      return;
+    }
+
+    const { sourceId } = z.object({ sourceId: z.string().uuid() }).parse(request.params);
+    const sourceRes = await app.pg.query("select id from connector_sources where id = $1", [sourceId]);
+
+    if ((sourceRes.rowCount ?? 0) === 0) {
+      return reply.status(404).send({ message: "Source 不存在" });
+    }
+
+    await app.pg.query("delete from connector_sources where id = $1", [sourceId]);
+    return { message: "Source 已删除" };
+  });
 }

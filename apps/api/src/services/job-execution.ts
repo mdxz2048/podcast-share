@@ -224,7 +224,9 @@ export async function executeSourceImport(
       packagePath: context.packagePath,
       manifest: context.manifestJson,
       inputConfig: mergedInput,
-      secretConfig: context.secretConfig
+      secretConfig: context.secretConfig,
+      eventCallbackUrl: `${env.API_BASE_URL}/internal/runner/jobs/${jobId}/events`,
+      eventCallbackToken: env.RUNNER_INTERNAL_TOKEN
     })
   });
 
