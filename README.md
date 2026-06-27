@@ -49,6 +49,16 @@ pnpm dev
 - PostgreSQL 迁移脚本
 - Docker Compose 基础依赖
 
+## 阶段 2 已实现
+
+- Program / Episode / Media / RSS 数据模型迁移
+- 用户节目目录、节目详情、单集查询 API
+- 用户 RSS 创建、编辑、删除、Token 轮换 API
+- 私有 RSS XML 输出（按发布时间倒序混排）
+- 私有音频访问（GET / HEAD / HTTP Range）
+- 管理员节目开放、关闭、可见范围基础 API
+- 用户端节目与 RSS 页面接入
+
 ## 管理员初始化
 
 默认从 `.env` 读取：
@@ -76,3 +86,8 @@ pnpm --filter @podcast-hub/api test
 - `apps/runner`: Runner 服务占位
 - `deploy/compose`: 本地 Docker Compose
 - `docs`: 设计文档
+
+## 阶段文档
+
+- `docs/stage-1.md`
+- `docs/stage-2.md`

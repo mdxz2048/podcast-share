@@ -5,6 +5,9 @@ import { pgPlugin } from "./plugins/pg.js";
 import { authPlugin } from "./plugins/auth.js";
 import { authRoutes } from "./routes/auth.js";
 import { adminAuthRoutes } from "./routes/admin-auth.js";
+import { programRoutes } from "./routes/programs.js";
+import { rssRoutes } from "./routes/rss.js";
+import { adminProgramRoutes } from "./routes/admin-programs.js";
 
 export function buildApp() {
   const app = Fastify({ logger: true });
@@ -18,6 +21,9 @@ export function buildApp() {
   app.register(authPlugin);
   app.register(authRoutes);
   app.register(adminAuthRoutes);
+  app.register(programRoutes);
+  app.register(rssRoutes);
+  app.register(adminProgramRoutes);
 
   app.get("/health", async () => ({ ok: true }));
 
