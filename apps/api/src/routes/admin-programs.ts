@@ -122,6 +122,7 @@ export async function adminProgramRoutes(app: FastifyInstance): Promise<void> {
       .object({
         title: z.string().min(1).optional(),
         description: z.string().optional(),
+        coverImageUrl: z.string().url().nullable().optional(),
         publishStatus: z.enum(["draft", "published", "archived"]).optional(),
         visibilityMode: z.enum(["closed", "all_registered_users", "audience_groups", "specific_users"]).optional()
       })
@@ -136,11 +137,20 @@ export async function adminProgramRoutes(app: FastifyInstance): Promise<void> {
       `update programs
        set title = coalesce($1, title),
            description = coalesce($2, description),
-           publish_status = coalesce($3, publish_status),
-           visibility_mode = coalesce($4, visibility_mode),
+           cover_image_url = case when $3::boolean then $4 else cover_image_url end,
+           publish_status = coalesce($5, publish_status),
+           visibility_mode = coalesce($6, visibility_mode),
            updated_at = now()
-       where id = $5`,
-      [body.title ?? null, body.description ?? null, body.publishStatus ?? null, body.visibilityMode ?? null, programId]
+       where id = $7`,
+      [
+        body.title ?? null,
+        body.description ?? null,
+        Object.prototype.hasOwnProperty.call(body, "coverImageUrl"),
+        body.coverImageUrl ?? null,
+        body.publishStatus ?? null,
+        body.visibilityMode ?? null,
+        programId
+      ]
     );
 
     if (body.visibilityMode === "closed" || body.visibilityMode === "all_registered_users") {
@@ -150,6 +160,7 @@ export async function adminProgramRoutes(app: FastifyInstance): Promise<void> {
 
     await writeAdminAuditLog(app, request.user.id, "program.updated", "program", programId, {
       title: body.title ?? null,
+      coverImageUrl: Object.prototype.hasOwnProperty.call(body, "coverImageUrl") ? body.coverImageUrl ?? null : undefined,
       publishStatus: body.publishStatus ?? null,
       visibilityMode: body.visibilityMode ?? null
     });

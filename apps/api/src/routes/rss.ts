@@ -1,4 +1,5 @@
 import { createReadStream, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
@@ -452,8 +453,9 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
     );
 
     const itemRes = await app.pg.query(
-      `select e.id as episode_id, e.title as episode_title, e.description as episode_description,
-              e.published_at, e.duration_seconds, m.size_bytes, m.content_type, p.title as program_title
+            `select e.id as episode_id, e.title as episode_title, e.description as episode_description,
+              e.published_at, e.duration_seconds, m.size_bytes, m.content_type,
+              p.title as program_title, p.cover_image_url
        from rss_feed_programs rfp
        join programs p on p.id = rfp.program_id
        join episodes e on e.program_id = p.id
@@ -497,6 +499,7 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
       mediaLength: Number(row.size_bytes),
       mediaType: row.content_type,
       programTitle: row.program_title,
+      programImageUrl: row.cover_image_url,
       durationSeconds: row.duration_seconds === null ? null : Number(row.duration_seconds)
     }));
 
@@ -578,7 +581,8 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
       }
 
       const size = Number(row.size_bytes || fileStat.size);
-      const etag = `"${row.storage_key}-${size}"`;
+      const etagDigest = createHash("sha1").update(String(row.storage_key)).digest("hex");
+      const etag = `"${etagDigest}-${size}"`;
       const lastModified = new Date(row.updated_at).toUTCString();
 
       reply.header("Accept-Ranges", "bytes");

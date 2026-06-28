@@ -7,6 +7,7 @@ export type FeedItem = {
   mediaLength: number;
   mediaType: string;
   programTitle: string;
+  programImageUrl?: string | null;
   durationSeconds?: number | null;
 };
 
@@ -38,9 +39,11 @@ function formatDuration(seconds: number | null | undefined): string | null {
 
 export function buildRssXml(feedName: string, feedUrl: string, items: FeedItem[], template?: Partial<RssTemplate>): string {
   const sorted = [...items].sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
+  const channelImageUrl = sorted.find((item) => item.programImageUrl)?.programImageUrl?.trim() || "";
   const itemXml = sorted
     .map((item) => {
       const duration = formatDuration(item.durationSeconds);
+      const imageUrl = item.programImageUrl?.trim() || "";
       return `<item>
 <title>${xmlEscape(`[${item.programTitle}]${item.title}`)}</title>
 <description>${xmlEscape(item.description ?? "")}</description>
@@ -48,6 +51,7 @@ export function buildRssXml(feedName: string, feedUrl: string, items: FeedItem[]
 <guid isPermaLink="false">${item.episodeId}</guid>
 <enclosure url="${xmlEscape(item.audioUrl)}" length="${item.mediaLength}" type="${xmlEscape(item.mediaType)}" />
 <author>${xmlEscape(item.programTitle)}</author>
+${imageUrl ? `<itunes:image href="${xmlEscape(imageUrl)}" />` : ""}
 ${duration ? `<itunes:duration>${xmlEscape(duration)}</itunes:duration>` : ""}
 </item>`
     })
@@ -68,6 +72,8 @@ ${duration ? `<itunes:duration>${xmlEscape(duration)}</itunes:duration>` : ""}
 <title>${xmlEscape(channelTitle)}</title>
 <link>${xmlEscape(channelLink)}</link>
 <description>${xmlEscape(descriptionParts.join("\n\n"))}</description>
+${channelImageUrl ? `<image><url>${xmlEscape(channelImageUrl)}</url><title>${xmlEscape(channelTitle)}</title><link>${xmlEscape(channelLink)}</link></image>` : ""}
+${channelImageUrl ? `<itunes:image href="${xmlEscape(channelImageUrl)}" />` : ""}
 ${itemXml}
 </channel>
 </rss>`;

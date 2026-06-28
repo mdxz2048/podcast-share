@@ -9,6 +9,7 @@ type VisibilityMode = "closed" | "all_registered_users" | "audience_groups" | "s
 type ProgramDetail = {
   id: string;
   title: string;
+  cover_image_url?: string | null;
   publish_status: string;
   visibility_mode: VisibilityMode;
 };
@@ -37,6 +38,7 @@ export default function AdminProgramDetailPage({ params }: { params: { id: strin
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [groups, setGroups] = useState<AudienceGroup[]>([]);
   const [users, setUsers] = useState<UserItem[]>([]);
+  const [coverImageUrl, setCoverImageUrl] = useState("");
   const [message, setMessage] = useState("加载中...");
 
   async function load() {
@@ -70,10 +72,12 @@ export default function AdminProgramDetailPage({ params }: { params: { id: strin
     }
 
     const visibility = visibilityJson as VisibilityDetail;
-    setProgram(programJson as ProgramDetail);
+    const nextProgram = programJson as ProgramDetail;
+    setProgram(nextProgram);
     setMode(visibility.visibilityMode);
     setSelectedAudienceGroupIds(toIds(visibility.audienceGroups));
     setSelectedUserIds(toIds(visibility.users));
+    setCoverImageUrl(nextProgram.cover_image_url ?? "");
 
     setGroups((groupsJson.items ?? []).map((item: any) => ({ id: item.id, name: item.name })));
     setUsers((usersJson.items ?? []).map((item: any) => ({ id: item.id, email: item.email })));
@@ -116,6 +120,28 @@ export default function AdminProgramDetailPage({ params }: { params: { id: strin
     await load();
   }
 
+  async function submitProgramMeta() {
+    const value = coverImageUrl.trim();
+    const payload = {
+      coverImageUrl: value.length > 0 ? value : null
+    };
+
+    const res = await fetch(`${apiBase}/admin/programs/${params.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(payload)
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      setMessage(json.message ?? "保存节目封面失败");
+      return;
+    }
+
+    setMessage("节目封面已更新");
+    await load();
+  }
+
   return (
     <section className="space-y-4">
       <h1 className="text-2xl font-semibold">节目可见性配置</h1>
@@ -128,6 +154,20 @@ export default function AdminProgramDetailPage({ params }: { params: { id: strin
       ) : null}
 
       {message ? <p className="text-sm text-muted">{message}</p> : null}
+
+      <div className="card space-y-3">
+        <label className="text-sm">节目封面 URL</label>
+        <input
+          className="input"
+          onChange={(event) => setCoverImageUrl(event.target.value)}
+          placeholder="https://example.com/podcast-cover.jpg"
+          value={coverImageUrl}
+        />
+        <p className="text-xs text-muted">用于 RSS 中的节目封面显示。留空可清除。</p>
+        <button className="button" onClick={submitProgramMeta}>
+          保存封面
+        </button>
+      </div>
 
       <div className="card space-y-3">
         <label className="text-sm">可见范围</label>
