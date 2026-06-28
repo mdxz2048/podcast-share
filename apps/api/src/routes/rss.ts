@@ -4,7 +4,7 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { env } from "../config.js";
 import { createOpaqueToken, hashOpaqueToken } from "../utils/security.js";
-import { buildRssXml, parseRange, type FeedItem } from "../utils/rss.js";
+import { buildRssXml, parseRange, type FeedItem, type RssTemplate } from "../utils/rss.js";
 
 async function assertFeedOwner(app: FastifyInstance, userId: string, feedId: string) {
   const feedRes = await app.pg.query(
@@ -27,6 +27,27 @@ function buildRssUrl(token: string | null | undefined): string | null {
 function accessSummary(request: { ip: string; headers: Record<string, unknown> }): string {
   const userAgent = typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"] : "";
   return `${request.ip}|${userAgent.slice(0, 240)}`;
+}
+
+const defaultRssTemplate: RssTemplate = {
+  description: "爱听就多听。",
+  siteUrl: "https://podcast.mddxz.top",
+  contact: "",
+  notice: ""
+};
+
+async function loadRssTemplate(app: FastifyInstance): Promise<RssTemplate> {
+  const res = await app.pg.query("select value_json from app_settings where key = 'rss_template'");
+  if ((res.rowCount ?? 0) === 0) {
+    return defaultRssTemplate;
+  }
+  const raw = (res.rows[0].value_json ?? {}) as Partial<RssTemplate>;
+  return {
+    description: raw.description ?? defaultRssTemplate.description,
+    siteUrl: raw.siteUrl ?? defaultRssTemplate.siteUrl,
+    contact: raw.contact ?? defaultRssTemplate.contact,
+    notice: raw.notice ?? defaultRssTemplate.notice
+  };
 }
 
 export async function rssRoutes(app: FastifyInstance): Promise<void> {
@@ -169,7 +190,7 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(401).send({ message: "未登录管理员" });
     }
 
-    const [statsRes, feedRows] = await Promise.all([
+    const [statsRes, feedRows, template] = await Promise.all([
       app.pg.query(
         `select count(*)::int as total,
                 count(*) filter (where status = 'active' and revoked_at is null)::int as active,
@@ -204,11 +225,13 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
          ) event_stats on true
          order by rf.updated_at desc
          limit 100`
-      )
+      ),
+      loadRssTemplate(app)
     ]);
 
     return {
       stats: statsRes.rows[0],
+      template,
       items: feedRows.rows.map((row) => ({
         id: row.id,
         name: row.name,
@@ -223,6 +246,31 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
         rotatedAt: row.rotated_at
       }))
     };
+  });
+
+  app.patch("/admin/rss/template", async (request, reply) => {
+    if (!request.user?.isAdmin) {
+      return reply.status(401).send({ message: "未登录管理员" });
+    }
+
+    const body = z
+      .object({
+        description: z.string().max(1000),
+        siteUrl: z.union([z.string().url(), z.literal("")]).default(""),
+        contact: z.string().max(500).default(""),
+        notice: z.string().max(1000).default("")
+      })
+      .parse(request.body);
+
+    await app.pg.query(
+      `insert into app_settings (key, value_json, updated_at)
+       values ('rss_template', $1::jsonb, now())
+       on conflict (key)
+       do update set value_json = excluded.value_json, updated_at = now()`,
+      [JSON.stringify(body)]
+    );
+
+    return { message: "RSS 公共模板已更新", template: body };
   });
 
   app.post("/me/rss-feeds", async (request, reply) => {
@@ -405,7 +453,7 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
 
     const itemRes = await app.pg.query(
       `select e.id as episode_id, e.title as episode_title, e.description as episode_description,
-              e.published_at, m.size_bytes, m.content_type, p.title as program_title
+              e.published_at, e.duration_seconds, m.size_bytes, m.content_type, p.title as program_title
        from rss_feed_programs rfp
        join programs p on p.id = rfp.program_id
        join episodes e on e.program_id = p.id
@@ -448,10 +496,11 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
       audioUrl: `${env.API_BASE_URL}/rss/private/${token}/episodes/${row.episode_id}/media`,
       mediaLength: Number(row.size_bytes),
       mediaType: row.content_type,
-      programTitle: row.program_title
+      programTitle: row.program_title,
+      durationSeconds: row.duration_seconds === null ? null : Number(row.duration_seconds)
     }));
 
-    const rssXml = buildRssXml(feed.name, `${env.API_BASE_URL}/rss/private/${token}.xml`, items);
+    const rssXml = buildRssXml(feed.name, `${env.API_BASE_URL}/rss/private/${token}.xml`, items, await loadRssTemplate(app));
     reply.type("application/rss+xml; charset=utf-8");
     return reply.send(rssXml);
   });

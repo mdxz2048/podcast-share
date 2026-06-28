@@ -6,6 +6,12 @@ const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
 
 type AdminRssOverview = {
   stats: { total: number; active: number; revoked: number; requests_7d: number };
+  template: {
+    description: string;
+    siteUrl: string;
+    contact: string;
+    notice: string;
+  };
   items: Array<{
     id: string;
     name: string;
@@ -21,10 +27,10 @@ type AdminRssOverview = {
 
 export default function AdminRssPage() {
   const [data, setData] = useState<AdminRssOverview | null>(null);
+  const [template, setTemplate] = useState({ description: "", siteUrl: "https://podcast.mddxz.top", contact: "", notice: "" });
   const [message, setMessage] = useState("加载中...");
 
-  useEffect(() => {
-    async function load() {
+  async function load() {
       const res = await fetch(`${apiBase}/admin/rss/overview`, { credentials: "include" });
       const json = await res.json();
       if (!res.ok) {
@@ -32,10 +38,32 @@ export default function AdminRssPage() {
         return;
       }
       setData(json);
+      setTemplate({
+        description: json.template?.description ?? "",
+        siteUrl: json.template?.siteUrl ?? "https://podcast.mddxz.top",
+        contact: json.template?.contact ?? "",
+        notice: json.template?.notice ?? ""
+      });
       setMessage("");
     }
+
+  useEffect(() => {
     load();
   }, []);
+
+  async function saveTemplate() {
+    const res = await fetch(`${apiBase}/admin/rss/template`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(template)
+    });
+    const json = await res.json();
+    setMessage(json.message ?? (res.ok ? "已保存" : "保存失败"));
+    if (res.ok) {
+      await load();
+    }
+  }
 
   return (
     <section className="space-y-5">
@@ -47,6 +75,34 @@ export default function AdminRssPage() {
 
       {data ? (
         <>
+          <section className="card space-y-3">
+            <div>
+              <h2 className="text-base font-medium">RSS 公共模板</h2>
+              <p className="mt-1 text-xs text-muted">这些内容会追加到每个 RSS 的频道简介里；频道标题使用用户创建 RSS 时填写的名称。</p>
+            </div>
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="space-y-1 text-sm">
+                <span>网站链接</span>
+                <input className="input" value={template.siteUrl} onChange={(event) => setTemplate((current) => ({ ...current, siteUrl: event.target.value }))} />
+              </label>
+              <label className="space-y-1 text-sm">
+                <span>联系方式</span>
+                <input className="input" value={template.contact} onChange={(event) => setTemplate((current) => ({ ...current, contact: event.target.value }))} />
+              </label>
+            </div>
+            <label className="space-y-1 text-sm">
+              <span>网站简介</span>
+              <textarea className="input min-h-20" value={template.description} onChange={(event) => setTemplate((current) => ({ ...current, description: event.target.value }))} />
+            </label>
+            <label className="space-y-1 text-sm">
+              <span>通知</span>
+              <textarea className="input min-h-24" value={template.notice} onChange={(event) => setTemplate((current) => ({ ...current, notice: event.target.value }))} />
+            </label>
+            <button className="button" onClick={saveTemplate}>
+              保存模板
+            </button>
+          </section>
+
           <div className="grid gap-3 md:grid-cols-4">
             <article className="card">
               <p className="text-xs text-muted">RSS 总数</p>

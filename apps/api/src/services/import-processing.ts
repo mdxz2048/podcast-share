@@ -65,23 +65,25 @@ async function upsertEpisode(app: FastifyInstance, sourceId: string, event: Runn
   }
 
   const description = typeof event.description === "string" ? event.description : null;
+  const durationSeconds = typeof event.duration_seconds === "number" ? Math.max(0, Math.trunc(event.duration_seconds)) : null;
 
   const inserted = await app.pg.query(
     `insert into episodes (
         id, program_id, external_episode_id, title, description,
-        published_at, is_published, is_hidden, created_at, updated_at
+        published_at, duration_seconds, is_published, is_hidden, created_at, updated_at
      ) values (
         gen_random_uuid(), $1, $2, $3, $4,
-        $5::timestamptz, true, false, now(), now()
+        $5::timestamptz, $6, true, false, now(), now()
      )
      on conflict (program_id, external_episode_id)
      do update set
        title = excluded.title,
        description = excluded.description,
        published_at = excluded.published_at,
+       duration_seconds = excluded.duration_seconds,
        updated_at = now()
      returning id`,
-    [programId, externalEpisodeId, title, description, publishedAt]
+    [programId, externalEpisodeId, title, description, publishedAt, durationSeconds]
   );
 
   return inserted.rows[0].id;
@@ -93,6 +95,7 @@ async function upsertMedia(app: FastifyInstance, sourceId: string, event: Runner
   const contentType = typeof event.content_type === "string" ? event.content_type : "audio/mpeg";
   const size = typeof event.size === "number" ? event.size : 0;
   const checksum = typeof event.checksum === "string" ? event.checksum : null;
+  const durationSeconds = typeof event.duration_seconds === "number" ? Math.max(0, Math.trunc(event.duration_seconds)) : null;
 
   if (!externalEpisodeId || !file) {
     return false;
@@ -116,19 +119,20 @@ async function upsertMedia(app: FastifyInstance, sourceId: string, event: Runner
   await app.pg.query(
     `insert into media_assets (
         id, episode_id, storage_provider, storage_bucket, storage_key, original_filename,
-        content_type, size_bytes, checksum, status, created_at, updated_at
+        content_type, size_bytes, checksum, duration_seconds, status, created_at, updated_at
      ) values (
         gen_random_uuid(), $1, 'local', null, $2, $3,
-        $4, $5, $6, 'ready', now(), now()
+        $4, $5, $6, $7, 'ready', now(), now()
      )
      on conflict (storage_key)
      do update set
        content_type = excluded.content_type,
        size_bytes = excluded.size_bytes,
        checksum = excluded.checksum,
+       duration_seconds = coalesce(excluded.duration_seconds, media_assets.duration_seconds),
        status = 'ready',
        updated_at = now()`,
-    [episodeId, file, file.split("/").pop() ?? file, contentType, size, checksum]
+    [episodeId, file, file.split("/").pop() ?? file, contentType, size, checksum, durationSeconds]
   );
 
   return true;

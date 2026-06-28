@@ -7,6 +7,14 @@ export type FeedItem = {
   mediaLength: number;
   mediaType: string;
   programTitle: string;
+  durationSeconds?: number | null;
+};
+
+export type RssTemplate = {
+  description: string;
+  siteUrl: string;
+  contact?: string;
+  notice?: string;
 };
 
 export function xmlEscape(input: string): string {
@@ -18,27 +26,48 @@ export function xmlEscape(input: string): string {
     .replaceAll("'", "&apos;");
 }
 
-export function buildRssXml(feedName: string, feedUrl: string, items: FeedItem[]): string {
+function formatDuration(seconds: number | null | undefined): string | null {
+  if (!seconds || seconds <= 0) {
+    return null;
+  }
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
+}
+
+export function buildRssXml(feedName: string, feedUrl: string, items: FeedItem[], template?: Partial<RssTemplate>): string {
   const sorted = [...items].sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
   const itemXml = sorted
-    .map(
-      (item) => `<item>
-<title>${xmlEscape(item.title)}</title>
+    .map((item) => {
+      const duration = formatDuration(item.durationSeconds);
+      return `<item>
+<title>${xmlEscape(`[${item.programTitle}]${item.title}`)}</title>
 <description>${xmlEscape(item.description ?? "")}</description>
 <pubDate>${new Date(item.publishedAt).toUTCString()}</pubDate>
 <guid isPermaLink="false">${item.episodeId}</guid>
 <enclosure url="${xmlEscape(item.audioUrl)}" length="${item.mediaLength}" type="${xmlEscape(item.mediaType)}" />
 <author>${xmlEscape(item.programTitle)}</author>
+${duration ? `<itunes:duration>${xmlEscape(duration)}</itunes:duration>` : ""}
 </item>`
-    )
+    })
     .join("\n");
 
+  const channelTitle = feedName;
+  const descriptionParts = [
+    template?.description?.trim() || "Podcast Hub 私有订阅",
+    template?.siteUrl?.trim() ? `网站：${template.siteUrl.trim()}` : "",
+    template?.contact?.trim() ? `联系：${template.contact.trim()}` : "",
+    template?.notice?.trim()
+  ].filter(Boolean);
+  const channelLink = template?.siteUrl?.trim() || feedUrl;
+
   return `<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0">
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
 <channel>
-<title>${xmlEscape(feedName)}</title>
-<link>${xmlEscape(feedUrl)}</link>
-<description>Podcast Hub 私有订阅</description>
+<title>${xmlEscape(channelTitle)}</title>
+<link>${xmlEscape(channelLink)}</link>
+<description>${xmlEscape(descriptionParts.join("\n\n"))}</description>
 ${itemXml}
 </channel>
 </rss>`;

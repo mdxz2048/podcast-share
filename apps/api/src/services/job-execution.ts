@@ -99,6 +99,34 @@ function mergeInput(baseInput: Record<string, unknown>, additionalInput?: Record
   };
 }
 
+async function loadExistingExternalEpisodeIds(app: FastifyInstance, sourceId: string): Promise<string[]> {
+  const res = await app.pg.query(
+    `select e.external_episode_id
+     from episodes e
+     join programs p on p.id = e.program_id
+     where p.source_id = $1
+       and e.external_episode_id is not null
+     order by e.created_at desc
+     limit 10000`,
+    [sourceId]
+  );
+  return res.rows.map((row) => row.external_episode_id).filter((value): value is string => typeof value === "string" && value.length > 0);
+}
+
+async function writeJobLog(
+  app: FastifyInstance,
+  jobId: string,
+  message: string,
+  payload: Record<string, unknown> = {},
+  level: "info" | "warn" | "error" = "info"
+): Promise<void> {
+  await app.pg.query(
+    `insert into import_job_events (id, job_id, event_type, level, message, payload_json, created_at)
+     values (gen_random_uuid(), $1, 'job_log', $2, $3, $4::jsonb, now())`,
+    [jobId, level, message, JSON.stringify(payload)]
+  );
+}
+
 async function createJob(
   app: FastifyInstance,
   context: SourceExecutionContext,
@@ -138,6 +166,16 @@ async function createJob(
   );
 
   const jobId = jobRes.rows[0].id as string;
+  await writeJobLog(app, jobId, `job created (${triggerType})`, {
+    triggerType,
+    sourceId: context.sourceId,
+    sourceName: context.sourceName,
+    connectorId: context.connectorId,
+    connectorVersionId: context.connectorVersionId,
+    inputKeys: Object.keys(inputConfig),
+    secretKeys: Object.keys(context.secretConfig)
+  });
+
   await app.pg.query(
     `insert into import_job_inputs (id, job_id, input_summary_json, created_at)
      values (gen_random_uuid(), $1, $2::jsonb, now())`,
@@ -199,7 +237,11 @@ export async function executeSourceImport(
     }
   }
 
-  const mergedInput = mergeInput(context.inputConfig, params.additionalInput);
+  const existingExternalEpisodeIds = await loadExistingExternalEpisodeIds(app, params.sourceId);
+  const mergedInput = {
+    ...mergeInput(context.inputConfig, params.additionalInput),
+    existing_external_episode_ids: existingExternalEpisodeIds
+  };
   const jobId = params.existingJobId ?? (await createJob(app, context, params.triggerType, params.createdBy, mergedInput));
 
   if (params.existingJobId) {
@@ -215,8 +257,17 @@ export async function executeSourceImport(
   }
 
   await transitionJobStatus(app, jobId, "running");
+  await writeJobLog(app, jobId, "job status changed to running", {
+    triggerType: params.triggerType,
+    packagePath: context.packagePath
+  });
 
   const runnerEventCallbackBaseUrl = env.RUNNER_EVENT_CALLBACK_BASE_URL ?? env.API_BASE_URL;
+  await writeJobLog(app, jobId, "calling runner internal run endpoint", {
+    runnerBaseUrl: env.RUNNER_BASE_URL,
+    eventCallbackBaseUrl: runnerEventCallbackBaseUrl
+  });
+
   const runnerResponse = await fetch(`${env.RUNNER_BASE_URL}/internal/run-import`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -232,6 +283,13 @@ export async function executeSourceImport(
   });
 
   const runnerJson = await runnerResponse.json();
+  await writeJobLog(app, jobId, "runner response received", {
+    ok: runnerResponse.ok,
+    status: runnerJson.status ?? null,
+    events: Array.isArray(runnerJson.events) ? runnerJson.events.length : 0,
+    copiedMediaCount: runnerJson.copiedMediaCount ?? 0
+  }, runnerResponse.ok ? "info" : "error");
+
   if (!runnerResponse.ok) {
     await app.pg.query(
       `update import_jobs
@@ -240,6 +298,9 @@ export async function executeSourceImport(
       [runnerJson.message ?? "runner execute failed", jobId]
     );
     await app.pg.query("update connector_sources set last_job_status = 'failed', updated_at = now() where id = $1", [params.sourceId]);
+    await writeJobLog(app, jobId, "runner execution failed", {
+      message: runnerJson.message ?? "runner execute failed"
+    }, "error");
     return {
       jobId,
       status: "failed",
@@ -249,6 +310,10 @@ export async function executeSourceImport(
 
   const events = Array.isArray(runnerJson.events) ? (runnerJson.events as Array<Record<string, unknown>>) : [];
   const importSummary = await applyRunnerEvents(app, jobId, params.sourceId, events);
+  await writeJobLog(app, jobId, "runner events imported", {
+    eventCount: events.length,
+    importSummary
+  });
 
   const statusFromRunner = runnerJson.status === "completed" ? "completed" : runnerJson.status === "failed" ? "failed" : "running";
   const finalStatus = resolveWaitingStatus(events, statusFromRunner as JobStatus);
@@ -279,6 +344,12 @@ export async function executeSourceImport(
       jobId
     ]
   );
+  await writeJobLog(app, jobId, "job finalized", {
+    finalStatus,
+    isTerminal,
+    importSummary,
+    errorSummary: runnerJson.stderr ?? null
+  }, finalStatus === "failed" ? "error" : "info");
 
   await app.pg.query(
     `insert into import_job_outputs (id, job_id, output_summary_json, created_at)
