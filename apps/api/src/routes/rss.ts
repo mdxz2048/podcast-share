@@ -20,6 +20,15 @@ async function assertFeedOwner(app: FastifyInstance, userId: string, feedId: str
   return feedRes.rows[0];
 }
 
+function buildRssUrl(token: string | null | undefined): string | null {
+  return token ? `${env.API_BASE_URL}/rss/private/${token}.xml` : null;
+}
+
+function accessSummary(request: { ip: string; headers: Record<string, unknown> }): string {
+  const userAgent = typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"] : "";
+  return `${request.ip}|${userAgent.slice(0, 240)}`;
+}
+
 export async function rssRoutes(app: FastifyInstance): Promise<void> {
   app.get("/me/rss-feeds", async (request, reply) => {
     if (!request.user) {
@@ -27,10 +36,26 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const feeds = await app.pg.query(
-      `select id, name, status, created_at, rotated_at
-       from rss_feeds
-       where user_id = $1 and revoked_at is null
-       order by created_at desc`,
+      `select rf.id, rf.name, rf.status, rf.created_at, rf.updated_at, rf.rotated_at, rf.access_token,
+              coalesce(program_stats.program_count, 0)::int as program_count,
+              coalesce(event_stats.request_count, 0)::int as request_count,
+              coalesce(event_stats.subscriber_estimate, 0)::int as subscriber_estimate,
+              event_stats.last_accessed_at
+       from rss_feeds rf
+       left join lateral (
+         select count(*) as program_count
+         from rss_feed_programs rfp
+         where rfp.rss_feed_id = rf.id
+       ) program_stats on true
+       left join lateral (
+         select count(*) filter (where event_type in ('rss_fetch', 'media_fetch')) as request_count,
+                count(distinct summary) filter (where event_type in ('rss_fetch', 'media_fetch')) as subscriber_estimate,
+                max(created_at) as last_accessed_at
+         from rss_feed_events rfe
+         where rfe.rss_feed_id = rf.id
+       ) event_stats on true
+       where rf.user_id = $1 and rf.revoked_at is null
+       order by rf.created_at desc`,
       [request.user.id]
     );
 
@@ -39,7 +64,162 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
         id: row.id,
         name: row.name,
         status: row.status,
+        rssUrl: buildRssUrl(row.access_token),
+        programCount: row.program_count,
+        requestCount: row.request_count,
+        subscriberEstimate: row.subscriber_estimate,
+        lastAccessedAt: row.last_accessed_at,
         createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        rotatedAt: row.rotated_at
+      }))
+    };
+  });
+
+  app.get("/me/overview", async (request, reply) => {
+    if (!request.user) {
+      return reply.status(401).send({ message: "请先登录" });
+    }
+
+    const [feedStats, libraryStats, feedRows] = await Promise.all([
+      app.pg.query(
+        `select count(*)::int as total,
+                count(*) filter (where status = 'active' and revoked_at is null)::int as active,
+                count(*) filter (where status = 'revoked' or revoked_at is not null)::int as revoked
+         from rss_feeds
+         where user_id = $1`,
+        [request.user.id]
+      ),
+      app.pg.query(
+        `select count(distinct p.id)::int as programs,
+                count(distinct e.id)::int as episodes
+         from programs p
+         join episodes e on e.program_id = p.id and e.is_published = true and e.is_hidden = false
+         join media_assets m on m.episode_id = e.id and m.status = 'ready'
+         where p.publish_status = 'published'
+           and p.is_archived = false
+           and (
+             p.visibility_mode = 'all_registered_users'
+             or (
+               p.visibility_mode = 'audience_groups'
+               and exists (
+                 select 1
+                 from program_audience_groups pag
+                 join user_audience_groups uag on uag.audience_group_id = pag.audience_group_id
+                 where pag.program_id = p.id and uag.user_id = $1
+               )
+             )
+             or (
+               p.visibility_mode = 'specific_users'
+               and exists (
+                 select 1
+                 from program_user_grants pug
+                 where pug.program_id = p.id and pug.user_id = $1
+               )
+             )
+           )`,
+        [request.user.id]
+      ),
+      app.pg.query(
+        `select rf.id, rf.name, rf.status, rf.created_at, rf.updated_at, rf.rotated_at,
+                coalesce(program_stats.program_count, 0)::int as program_count,
+                coalesce(event_stats.request_count, 0)::int as request_count,
+                coalesce(event_stats.subscriber_estimate, 0)::int as subscriber_estimate,
+                event_stats.last_accessed_at
+         from rss_feeds rf
+         left join lateral (
+           select count(*) as program_count
+           from rss_feed_programs rfp
+           where rfp.rss_feed_id = rf.id
+         ) program_stats on true
+         left join lateral (
+           select count(*) filter (where event_type in ('rss_fetch', 'media_fetch')) as request_count,
+                  count(distinct summary) filter (where event_type in ('rss_fetch', 'media_fetch')) as subscriber_estimate,
+                  max(created_at) as last_accessed_at
+           from rss_feed_events rfe
+           where rfe.rss_feed_id = rf.id
+         ) event_stats on true
+         where rf.user_id = $1
+         order by rf.updated_at desc
+         limit 12`,
+        [request.user.id]
+      )
+    ]);
+
+    return {
+      rss: feedStats.rows[0],
+      library: libraryStats.rows[0],
+      feeds: feedRows.rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        status: row.status,
+        programCount: row.program_count,
+        requestCount: row.request_count,
+        subscriberEstimate: row.subscriber_estimate,
+        lastAccessedAt: row.last_accessed_at,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        rotatedAt: row.rotated_at
+      }))
+    };
+  });
+
+  app.get("/admin/rss/overview", async (request, reply) => {
+    if (!request.user?.isAdmin) {
+      return reply.status(401).send({ message: "未登录管理员" });
+    }
+
+    const [statsRes, feedRows] = await Promise.all([
+      app.pg.query(
+        `select count(*)::int as total,
+                count(*) filter (where status = 'active' and revoked_at is null)::int as active,
+                count(*) filter (where status = 'revoked' or revoked_at is not null)::int as revoked,
+                coalesce((
+                  select count(*) from rss_feed_events
+                  where event_type in ('rss_fetch', 'media_fetch')
+                    and created_at >= now() - interval '7 days'
+                ), 0)::int as requests_7d
+         from rss_feeds`
+      ),
+      app.pg.query(
+        `select rf.id, rf.name, rf.status, rf.created_at, rf.updated_at, rf.rotated_at,
+                u.email as owner_email,
+                coalesce(program_stats.program_count, 0)::int as program_count,
+                coalesce(event_stats.request_count, 0)::int as request_count,
+                coalesce(event_stats.subscriber_estimate, 0)::int as subscriber_estimate,
+                event_stats.last_accessed_at
+         from rss_feeds rf
+         join users u on u.id = rf.user_id
+         left join lateral (
+           select count(*) as program_count
+           from rss_feed_programs rfp
+           where rfp.rss_feed_id = rf.id
+         ) program_stats on true
+         left join lateral (
+           select count(*) filter (where event_type in ('rss_fetch', 'media_fetch')) as request_count,
+                  count(distinct summary) filter (where event_type in ('rss_fetch', 'media_fetch')) as subscriber_estimate,
+                  max(created_at) as last_accessed_at
+           from rss_feed_events rfe
+           where rfe.rss_feed_id = rf.id
+         ) event_stats on true
+         order by rf.updated_at desc
+         limit 100`
+      )
+    ]);
+
+    return {
+      stats: statsRes.rows[0],
+      items: feedRows.rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        status: row.status,
+        ownerEmail: row.owner_email,
+        programCount: row.program_count,
+        requestCount: row.request_count,
+        subscriberEstimate: row.subscriber_estimate,
+        lastAccessedAt: row.last_accessed_at,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
         rotatedAt: row.rotated_at
       }))
     };
@@ -64,10 +244,10 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
     const tokenHash = hashOpaqueToken(token);
 
     const feedRes = await app.pg.query(
-      `insert into rss_feeds (id, user_id, name, token_hash, status, created_at, updated_at)
-       values (gen_random_uuid(), $1, $2, $3, 'active', now(), now())
+      `insert into rss_feeds (id, user_id, name, token_hash, access_token, status, created_at, updated_at)
+       values (gen_random_uuid(), $1, $2, $3, $4, 'active', now(), now())
        returning id, name, created_at`,
-      [request.user.id, body.name, tokenHash]
+      [request.user.id, body.name, tokenHash, token]
     );
 
     const feed = feedRes.rows[0];
@@ -189,9 +369,9 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
     const tokenHash = hashOpaqueToken(token);
     await app.pg.query(
       `update rss_feeds
-       set token_hash = $1, rotated_at = now(), updated_at = now()
-       where id = $2`,
-      [tokenHash, feedId]
+       set token_hash = $1, access_token = $2, rotated_at = now(), updated_at = now()
+       where id = $3`,
+      [tokenHash, token, feedId]
     );
 
     return {
@@ -217,6 +397,11 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const feed = feedRes.rows[0];
+    await app.pg.query(
+      `insert into rss_feed_events (id, rss_feed_id, event_type, summary, created_at)
+       values (gen_random_uuid(), $1, 'rss_fetch', $2, now())`,
+      [feed.id, accessSummary(request)]
+    );
 
     const itemRes = await app.pg.query(
       `select e.id as episode_id, e.title as episode_title, e.description as episode_description,
@@ -327,6 +512,12 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
       if (row.storage_provider !== "local") {
         return reply.status(501).send({ message: "当前仅支持本地存储读取" });
       }
+
+      await app.pg.query(
+        `insert into rss_feed_events (id, rss_feed_id, event_type, summary, created_at)
+         values (gen_random_uuid(), $1, 'media_fetch', $2, now())`,
+        [row.feed_id, accessSummary(request)]
+      );
 
       const absolutePath = resolve(process.cwd(), env.MEDIA_LOCAL_ROOT, row.storage_key);
 

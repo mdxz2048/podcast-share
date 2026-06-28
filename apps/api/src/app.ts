@@ -16,6 +16,7 @@ import { internalScheduleRoutes } from "./routes/internal-schedules.js";
 import { adminAudienceGroupRoutes } from "./routes/admin-audience-groups.js";
 import { adminUserRoutes } from "./routes/admin-users.js";
 import { adminAuditLogRoutes } from "./routes/admin-audit-logs.js";
+import { adminDashboardRoutes } from "./routes/admin-dashboard.js";
 import { internalRunnerEventRoutes } from "./routes/internal-runner-events.js";
 
 export function buildApp() {
@@ -36,6 +37,7 @@ export function buildApp() {
   app.register(authPlugin);
   app.register(authRoutes);
   app.register(adminAuthRoutes);
+  app.register(adminDashboardRoutes);
   app.register(programRoutes);
   app.register(rssRoutes);
   app.register(adminProgramRoutes);

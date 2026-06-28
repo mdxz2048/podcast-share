@@ -128,7 +128,11 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
               c.id as connector_id, c.name as connector_name, c.display_name as connector_display_name,
               cv.id as connector_version_id, cv.version as connector_version,
               active_job.id as active_job_id, active_job.status as active_job_status,
-              coalesce(job_usage.job_count, 0)::int as job_count
+              coalesce(job_usage.job_count, 0)::int as job_count,
+              coalesce(content_stats.program_count, 0)::int as program_count,
+              coalesce(content_stats.episode_count, 0)::int as episode_count,
+              coalesce(content_stats.media_count, 0)::int as media_count,
+              coalesce(content_stats.media_bytes, 0)::bigint as media_bytes
        from connector_sources s
        join connectors c on c.id = s.connector_id
        join connector_versions cv on cv.id = s.connector_version_id
@@ -145,6 +149,16 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
          from import_jobs j
          where j.source_id = s.id
        ) job_usage on true
+       left join lateral (
+         select count(distinct p.id) as program_count,
+                count(distinct e.id) as episode_count,
+                count(distinct m.id) as media_count,
+                coalesce(sum(m.size_bytes), 0) as media_bytes
+         from programs p
+         left join episodes e on e.program_id = p.id
+         left join media_assets m on m.episode_id = e.id and m.status = 'ready'
+         where p.source_id = s.id and p.is_archived = false
+       ) content_stats on true
        order by s.updated_at desc`
     );
 
@@ -166,6 +180,12 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
             }
           : null,
         inUse: Boolean(row.active_job_id),
+        stats: {
+          programs: row.program_count,
+          episodes: row.episode_count,
+          media: row.media_count,
+          mediaBytes: Number(row.media_bytes)
+        },
         createdAt: row.created_at,
         updatedAt: row.updated_at,
         connector: {
@@ -278,11 +298,31 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
               c.id as connector_id, c.name as connector_name, c.display_name as connector_display_name,
               cv.id as connector_version_id, cv.version as connector_version,
               cv.manifest_json,
-              csc.config_json
+              csc.config_json,
+              coalesce(content_stats.program_count, 0)::int as program_count,
+              coalesce(content_stats.episode_count, 0)::int as episode_count,
+              coalesce(content_stats.media_count, 0)::int as media_count,
+              coalesce(content_stats.media_bytes, 0)::bigint as media_bytes,
+              coalesce(job_stats.job_count, 0)::int as job_count
        from connector_sources s
        join connectors c on c.id = s.connector_id
        join connector_versions cv on cv.id = s.connector_version_id
        left join connector_source_configs csc on csc.source_id = s.id
+       left join lateral (
+         select count(distinct p.id) as program_count,
+                count(distinct e.id) as episode_count,
+                count(distinct m.id) as media_count,
+                coalesce(sum(m.size_bytes), 0) as media_bytes
+         from programs p
+         left join episodes e on e.program_id = p.id
+         left join media_assets m on m.episode_id = e.id and m.status = 'ready'
+         where p.source_id = s.id and p.is_archived = false
+       ) content_stats on true
+       left join lateral (
+         select count(*) as job_count
+         from import_jobs j
+         where j.source_id = s.id
+       ) job_stats on true
        where s.id = $1`,
       [sourceId]
     );
@@ -327,6 +367,13 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
         displayName: source.connector_display_name,
         versionId: source.connector_version_id,
         version: source.connector_version
+      },
+      stats: {
+        programs: source.program_count,
+        episodes: source.episode_count,
+        media: source.media_count,
+        mediaBytes: Number(source.media_bytes),
+        jobs: source.job_count
       },
       manifest: source.manifest_json,
       inputConfig: source.config_json ?? {},

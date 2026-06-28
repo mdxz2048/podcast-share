@@ -16,9 +16,11 @@ const adminLinks: Array<{ href: Route; label: string }> = [
   { href: "/admin", label: "后台首页" },
   { href: "/admin/programs", label: "节目管理" },
   { href: "/admin/connectors", label: "Connector 管理" },
-  { href: "/admin/connectors/upload", label: "上传 Connector" },
   { href: "/admin/sources", label: "Source 管理" },
-  { href: "/admin/jobs", label: "任务" }
+  { href: "/admin/jobs", label: "任务" },
+  { href: "/admin/users", label: "用户管理" },
+  { href: "/admin/audience-groups", label: "用户类别" },
+  { href: "/admin/rss", label: "RSS 管理" }
 ];
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
@@ -121,12 +123,12 @@ export function Nav() {
 
   return (
     <header className="border-b border-line bg-white">
-      <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
+      <div className="mx-auto flex max-w-7xl items-center justify-between gap-6 px-6 py-4">
         <Link href="/" className="text-lg font-semibold">
           Podcast Hub
         </Link>
-        <div className="flex items-center gap-6">
-          <nav className="flex gap-5 text-sm text-muted">
+        <div className="flex min-w-0 items-center gap-6">
+          <nav className="flex flex-wrap gap-x-5 gap-y-2 text-sm text-muted">
             {navLinks.map((item) => (
               <Link key={item.href} href={item.href} className="hover:text-ink">
                 {item.label}

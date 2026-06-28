@@ -5,6 +5,13 @@ import { useEffect, useState } from "react";
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
 
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
+
 type Source = {
   id: string;
   name: string;
@@ -16,6 +23,12 @@ type Source = {
     id: string;
     status: string;
   } | null;
+  stats: {
+    programs: number;
+    episodes: number;
+    media: number;
+    mediaBytes: number;
+  };
   connector: {
     displayName: string;
     version: string;
@@ -124,7 +137,10 @@ export default function AdminSourcesPage() {
 
   return (
     <section className="space-y-4">
-      <h1 className="text-2xl font-semibold">Source 列表</h1>
+      <div>
+        <h1 className="text-2xl font-semibold">Source 管理</h1>
+        <p className="mt-1 text-sm text-muted">Source 保存 Connector 的运行配置，并承载它导入出的节目、单集和音频。</p>
+      </div>
       {message ? <p className="text-sm text-muted">{message}</p> : null}
 
       <div className="card space-y-3">
@@ -152,8 +168,8 @@ export default function AdminSourcesPage() {
 
       <div className="space-y-3">
         {items.map((item) => (
-          <article className="card flex items-center justify-between" key={item.id}>
-            <div>
+          <article className="card grid gap-4 lg:grid-cols-[1.2fr_1fr_auto]" key={item.id}>
+            <div className="space-y-1">
               <h2 className="text-base font-medium">{item.name}</h2>
               <p className="text-xs text-muted">Connector：{item.connector.displayName}</p>
               <p className="text-xs text-muted">版本：{item.connector.version}</p>
@@ -164,7 +180,25 @@ export default function AdminSourcesPage() {
               </p>
               <p className="text-xs text-muted">历史任务数：{item.jobCount}</p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              <div className="rounded border border-line p-3">
+                <p className="text-lg font-semibold">{item.stats?.programs ?? 0}</p>
+                <p className="text-xs text-muted">节目</p>
+              </div>
+              <div className="rounded border border-line p-3">
+                <p className="text-lg font-semibold">{item.stats?.episodes ?? 0}</p>
+                <p className="text-xs text-muted">单集</p>
+              </div>
+              <div className="rounded border border-line p-3">
+                <p className="text-lg font-semibold">{item.stats?.media ?? 0}</p>
+                <p className="text-xs text-muted">音频</p>
+              </div>
+              <div className="rounded border border-line p-3">
+                <p className="text-lg font-semibold">{formatBytes(item.stats?.mediaBytes ?? 0)}</p>
+                <p className="text-xs text-muted">大小</p>
+              </div>
+            </div>
+            <div className="flex flex-col gap-2">
               <button className="button-secondary" onClick={() => toggleEnabled(item.id, !item.enabled)}>
                 {item.enabled ? "停用" : "启用"}
               </button>

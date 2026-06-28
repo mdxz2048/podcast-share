@@ -13,6 +13,10 @@ type Program = {
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
 
+function displayProgramTitle(title: string) {
+  return title.replace(/\s*真实导入\s*/g, "").trim() || title;
+}
+
 export default function ProgramsPage() {
   const [items, setItems] = useState<Program[]>([]);
   const [message, setMessage] = useState("加载中...");
@@ -38,7 +42,7 @@ export default function ProgramsPage() {
       <div className="grid gap-4 md:grid-cols-2">
         {items.map((item) => (
           <article key={item.id} className="card">
-            <h2 className="text-lg font-medium">{item.title}</h2>
+            <h2 className="text-lg font-medium">{displayProgramTitle(item.title)}</h2>
             <p className="mt-2 text-sm text-muted">{item.description ?? "暂无简介"}</p>
             <p className="mt-3 text-xs text-muted">单集数：{item.episodeCount}</p>
             <p className="text-xs text-muted">最近发布时间：{item.latestEpisodePublishedAt ?? "暂无"}</p>

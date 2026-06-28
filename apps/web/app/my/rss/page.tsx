@@ -1,12 +1,18 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState } from "react";
 
 type Feed = {
   id: string;
   name: string;
   status: string;
+  rssUrl: string | null;
+  programCount: number;
+  requestCount: number;
+  subscriberEstimate: number;
+  lastAccessedAt: string | null;
+  createdAt: string;
+  rotatedAt: string | null;
 };
 
 type Program = {
@@ -15,6 +21,10 @@ type Program = {
 };
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
+
+function displayProgramTitle(title: string) {
+  return title.replace(/\s*真实导入\s*/g, "").trim() || title;
+}
 
 export default function MyRssPage() {
   const [feeds, setFeeds] = useState<Feed[]>([]);
@@ -37,7 +47,7 @@ export default function MyRssPage() {
     }
 
     setFeeds(feedJson.items ?? []);
-    setPrograms((programJson.items ?? []).map((item: any) => ({ id: item.id, title: item.title })));
+    setPrograms((programJson.items ?? []).map((item: any) => ({ id: item.id, title: displayProgramTitle(item.title) })));
     setMessage("");
   }
 
@@ -58,7 +68,46 @@ export default function MyRssPage() {
       return;
     }
 
-    setMessage(`创建成功，请立即保存链接：${json.rssUrl}`);
+    setMessage(`创建成功：${json.rssUrl}`);
+    await load();
+  }
+
+  async function copyUrl(feed: Feed) {
+    if (!feed.rssUrl) {
+      setMessage("这个 RSS 是旧数据，更新链接后才能复制当前订阅链接。");
+      return;
+    }
+    await navigator.clipboard.writeText(feed.rssUrl);
+    setMessage(`已复制：${feed.name}`);
+  }
+
+  async function rotateFeed(feed: Feed) {
+    if (!confirm(`确认更新「${feed.name}」的 RSS 链接吗？旧链接会立即失效。`)) {
+      return;
+    }
+    const res = await fetch(`${apiBase}/me/rss-feeds/${feed.id}/rotate`, {
+      method: "POST",
+      credentials: "include"
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      setMessage(json.message ?? "更新失败");
+      return;
+    }
+    setMessage(`新链接已生成：${json.rssUrl}`);
+    await load();
+  }
+
+  async function deleteFeed(feed: Feed) {
+    if (!confirm(`确认删除 RSS「${feed.name}」吗？删除后该链接不可访问。`)) {
+      return;
+    }
+    const res = await fetch(`${apiBase}/me/rss-feeds/${feed.id}`, {
+      method: "DELETE",
+      credentials: "include"
+    });
+    const json = await res.json();
+    setMessage(json.message ?? (res.ok ? "RSS 已删除" : "删除失败"));
     await load();
   }
 
@@ -87,16 +136,35 @@ export default function MyRssPage() {
         </button>
       </div>
 
-      <div className="space-y-2">
+      <div className="space-y-3">
         {feeds.map((feed) => (
-          <article key={feed.id} className="card flex items-center justify-between">
-            <div>
+          <article key={feed.id} className="card space-y-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
               <h3 className="text-base font-medium">{feed.name}</h3>
-              <p className="text-xs text-muted">状态：{feed.status}</p>
+                <p className="mt-1 text-xs text-muted">
+                  状态：{feed.status} / 节目 {feed.programCount} / 访问 {feed.requestCount} / 估算订阅端 {feed.subscriberEstimate}
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button className="button-secondary" onClick={() => copyUrl(feed)}>
+                  复制链接
+                </button>
+                <button className="button-secondary" onClick={() => rotateFeed(feed)}>
+                  更新 RSS 链接
+                </button>
+                <button className="button-secondary" onClick={() => deleteFeed(feed)}>
+                  删除
+                </button>
+              </div>
             </div>
-            <Link href={`/my/rss/${feed.id}`} className="text-sm text-accent">
-              编辑
-            </Link>
+            <div className="rounded border border-line bg-slate-50 p-3">
+              <p className="text-xs text-muted">当前订阅链接</p>
+              <p className="mt-1 break-all font-mono text-xs">{feed.rssUrl ?? "旧链接无法反推，请点击“更新 RSS 链接”生成新链接。"}</p>
+            </div>
+            <p className="text-xs text-muted">
+              创建时间：{feed.createdAt} / 最近访问：{feed.lastAccessedAt ?? "-"} / 最近更新链接：{feed.rotatedAt ?? "-"}
+            </p>
           </article>
         ))}
       </div>

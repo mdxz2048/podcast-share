@@ -5,9 +5,22 @@ import { useEffect, useRef, useState } from "react";
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
 
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
+
 export default function AdminSourceDetailPage({ params }: { params: { id: string } }) {
   const [name, setName] = useState("");
   const [enabled, setEnabled] = useState(false);
+  const [sourceMeta, setSourceMeta] = useState<{
+    connector?: { displayName: string; version: string };
+    lastJobStatus?: string | null;
+    lastSuccessSyncAt?: string | null;
+    stats?: { programs: number; episodes: number; media: number; mediaBytes: number; jobs: number };
+  }>({});
   const [scheduleId, setScheduleId] = useState("");
   const [scheduleType, setScheduleType] = useState("hourly");
   const [schedulePaused, setSchedulePaused] = useState(false);
@@ -176,6 +189,12 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
 
     setName(json.name ?? "");
     setEnabled(Boolean(json.enabled));
+    setSourceMeta({
+      connector: json.connector,
+      lastJobStatus: json.lastJobStatus,
+      lastSuccessSyncAt: json.lastSuccessSyncAt,
+      stats: json.stats
+    });
     setInputConfigText(JSON.stringify(json.inputConfig ?? {}, null, 2));
     setScheduleId(json.schedule?.id ?? "");
     setScheduleType(json.schedule?.schedule_type ?? "hourly");
@@ -554,6 +573,42 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
     <section className="space-y-4">
       <h1 className="text-2xl font-semibold">Source 配置</h1>
       {message ? <p className="text-sm text-muted">{message}</p> : null}
+
+      <div className="card space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-medium">{name || "未命名 Source"}</h2>
+            <p className="mt-1 text-xs text-muted">
+              Connector：{sourceMeta.connector?.displayName ?? "-"} / 版本：{sourceMeta.connector?.version ?? "-"}
+            </p>
+          </div>
+          <p className="text-xs text-muted">
+            最近任务：{sourceMeta.lastJobStatus ?? "-"} / 最近成功：{sourceMeta.lastSuccessSyncAt ?? "-"}
+          </p>
+        </div>
+        <div className="grid gap-2 md:grid-cols-5">
+          <div className="rounded border border-line p-3">
+            <p className="text-xl font-semibold">{sourceMeta.stats?.programs ?? 0}</p>
+            <p className="text-xs text-muted">节目</p>
+          </div>
+          <div className="rounded border border-line p-3">
+            <p className="text-xl font-semibold">{sourceMeta.stats?.episodes ?? 0}</p>
+            <p className="text-xs text-muted">单集</p>
+          </div>
+          <div className="rounded border border-line p-3">
+            <p className="text-xl font-semibold">{sourceMeta.stats?.media ?? 0}</p>
+            <p className="text-xs text-muted">音频</p>
+          </div>
+          <div className="rounded border border-line p-3">
+            <p className="text-xl font-semibold">{formatBytes(sourceMeta.stats?.mediaBytes ?? 0)}</p>
+            <p className="text-xs text-muted">文件大小</p>
+          </div>
+          <div className="rounded border border-line p-3">
+            <p className="text-xl font-semibold">{sourceMeta.stats?.jobs ?? 0}</p>
+            <p className="text-xs text-muted">运行记录</p>
+          </div>
+        </div>
+      </div>
 
       <div className="card space-y-3">
         <label className="text-sm">Source 名称</label>
