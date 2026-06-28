@@ -10,6 +10,50 @@ function assertAdmin(request: { user: { id: string; isAdmin: boolean } | null },
   return true;
 }
 
+function normalizeJobEvent(row: {
+  event_type: string;
+  level: string | null;
+  message: string | null;
+  payload_json: Record<string, unknown> | null;
+  created_at: string;
+}) {
+  if ((row.event_type !== "runner_stdout" && row.event_type !== "runner_stderr") || !row.message) {
+    return row;
+  }
+
+  try {
+    const parsed = JSON.parse(row.message) as { type?: unknown; level?: unknown; message?: unknown };
+    if (typeof parsed.message === "string") {
+      if (parsed.type === "qr_image") {
+        return {
+          ...row,
+          event_type: "qr_image",
+          level: typeof parsed.level === "string" ? parsed.level : row.level,
+          message: parsed.message,
+          payload_json: {
+            ...(row.payload_json ?? {}),
+            ...parsed
+          }
+        };
+      }
+
+      return {
+        ...row,
+        level: typeof parsed.level === "string" ? parsed.level : row.level,
+        message: parsed.message,
+        payload_json: {
+          ...(row.payload_json ?? {}),
+          connectorEvent: parsed
+        }
+      };
+    }
+  } catch {
+    // Existing plain output is already normalized.
+  }
+
+  return row;
+}
+
 export async function adminJobRoutes(app: FastifyInstance): Promise<void> {
   app.get("/admin/jobs", async (request, reply) => {
     if (!assertAdmin(request, reply)) {
@@ -122,7 +166,7 @@ export async function adminJobRoutes(app: FastifyInstance): Promise<void> {
       errorSummary: job.error_summary,
       latestInputSnapshot: (inputsRes.rowCount ?? 0) > 0 ? inputsRes.rows[0] : null,
       latestOutputSnapshot: (outputsRes.rowCount ?? 0) > 0 ? outputsRes.rows[0] : null,
-      events: eventsRes.rows
+      events: eventsRes.rows.map(normalizeJobEvent)
     };
   });
 

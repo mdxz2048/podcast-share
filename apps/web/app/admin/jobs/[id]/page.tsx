@@ -13,6 +13,11 @@ type JobEvent = {
 
 export default function AdminJobDetailPage({ params }: { params: { id: string } }) {
   const [status, setStatus] = useState("");
+  const [sourceName, setSourceName] = useState("");
+  const [connectorName, setConnectorName] = useState("");
+  const [triggerType, setTriggerType] = useState("");
+  const [startedAt, setStartedAt] = useState("");
+  const [endedAt, setEndedAt] = useState("");
   const [summary, setSummary] = useState("");
   const [events, setEvents] = useState<JobEvent[]>([]);
   const [inputText, setInputText] = useState('{"otp":""}');
@@ -27,6 +32,11 @@ export default function AdminJobDetailPage({ params }: { params: { id: string } 
     }
 
     setStatus(json.status ?? "");
+    setSourceName(json.sourceName ?? "");
+    setConnectorName(`${json.connectorDisplayName ?? "-"} ${json.connectorVersion ?? ""}`.trim());
+    setTriggerType(json.triggerType ?? "");
+    setStartedAt(json.startedAt ?? "");
+    setEndedAt(json.endedAt ?? "");
     setSummary(`programs=${json.discoveredPrograms}, episodes=${json.discoveredEpisodes}, media=${json.importedMedia}, failed=${json.failedCount}`);
     setEvents(json.events ?? []);
     setMessage("");
@@ -68,9 +78,17 @@ export default function AdminJobDetailPage({ params }: { params: { id: string } 
 
   return (
     <section className="space-y-4">
-      <h1 className="text-2xl font-semibold">任务详情</h1>
-      <p className="text-sm text-muted">状态：{status || "-"}</p>
-      <p className="text-sm text-muted">摘要：{summary || "-"}</p>
+      <h1 className="text-2xl font-semibold">运行记录详情</h1>
+      <div className="card space-y-1">
+        <p className="text-sm text-muted">Job ID：{params.id}</p>
+        <p className="text-sm text-muted">Source：{sourceName || "-"}</p>
+        <p className="text-sm text-muted">Connector：{connectorName || "-"}</p>
+        <p className="text-sm text-muted">触发方式：{triggerType || "-"}</p>
+        <p className="text-sm text-muted">状态：{status || "-"}</p>
+        <p className="text-sm text-muted">开始：{startedAt || "-"}</p>
+        <p className="text-sm text-muted">结束：{endedAt || "-"}</p>
+        <p className="text-sm text-muted">导入摘要：{summary || "-"}</p>
+      </div>
       {message ? <p className="text-sm text-muted">{message}</p> : null}
 
       <button className="button" onClick={cancelJob}>

@@ -216,6 +216,7 @@ export async function executeSourceImport(
 
   await transitionJobStatus(app, jobId, "running");
 
+  const runnerEventCallbackBaseUrl = env.RUNNER_EVENT_CALLBACK_BASE_URL ?? env.API_BASE_URL;
   const runnerResponse = await fetch(`${env.RUNNER_BASE_URL}/internal/run-import`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -225,7 +226,7 @@ export async function executeSourceImport(
       manifest: context.manifestJson,
       inputConfig: mergedInput,
       secretConfig: context.secretConfig,
-      eventCallbackUrl: `${env.API_BASE_URL}/internal/runner/jobs/${jobId}/events`,
+      eventCallbackUrl: `${runnerEventCallbackBaseUrl}/internal/runner/jobs/${jobId}/events`,
       eventCallbackToken: env.RUNNER_INTERNAL_TOKEN
     })
   });

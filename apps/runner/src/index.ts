@@ -79,7 +79,7 @@ async function postRunnerEvent(
 	}
 
 	try {
-		await fetch(callbackUrl, {
+		const response = await fetch(callbackUrl, {
 			method: "POST",
 			headers: {
 				"content-type": "application/json",
@@ -87,8 +87,11 @@ async function postRunnerEvent(
 			},
 			body: JSON.stringify(event)
 		});
-	} catch {
-		// Ignore callback failures; final runner result still returns normally.
+		if (!response.ok) {
+			app.log.warn({ status: response.status, callbackUrl, eventType: event.eventType }, "runner event callback failed");
+		}
+	} catch (error) {
+		app.log.warn({ error, callbackUrl, eventType: event.eventType }, "runner event callback error");
 	}
 }
 
@@ -156,11 +159,22 @@ app.post("/internal/run-import", async (request, reply) => {
 		const venvPython = resolve(venvDir, "bin/python3");
 		const venvPip = resolve(venvDir, "bin/pip3");
 
+		await postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, {
+			eventType: "runner_setup",
+			level: "info",
+			message: "creating python virtual environment"
+		});
+
 		const venvCreate = await runProcess(pythonCmd, ["-m", "venv", venvDir], {
 			cwd: extractedDir,
 			env: process.env
 		});
 		if (venvCreate.exitCode !== 0) {
+			await postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, {
+				eventType: "runner_setup",
+				level: "error",
+				message: "failed to create python virtual environment"
+			});
 			return reply.status(500).send({
 				status: "failed",
 				message: "创建 Python 虚拟环境失败",
@@ -168,11 +182,22 @@ app.post("/internal/run-import", async (request, reply) => {
 			});
 		}
 
+		await postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, {
+			eventType: "runner_setup",
+			level: "info",
+			message: "initializing python build tools"
+		});
+
 		const pipInstallTools = await runProcess(venvPython, ["-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], {
 			cwd: extractedDir,
 			env: process.env
 		});
 		if (pipInstallTools.exitCode !== 0) {
+			await postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, {
+				eventType: "runner_setup",
+				level: "error",
+				message: "failed to initialize python build tools"
+			});
 			return reply.status(500).send({
 				status: "failed",
 				message: "初始化 Python 依赖环境失败",
@@ -181,11 +206,21 @@ app.post("/internal/run-import", async (request, reply) => {
 		}
 
 		if (existsSync(requirementsPath)) {
+			await postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, {
+				eventType: "runner_setup",
+				level: "info",
+				message: "installing connector dependencies"
+			});
 			const pipInstallDeps = await runProcess(venvPip, ["install", "-r", requirementsPath], {
 				cwd: extractedDir,
 				env: process.env
 			});
 			if (pipInstallDeps.exitCode !== 0) {
+				await postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, {
+					eventType: "runner_setup",
+					level: "error",
+					message: "failed to install connector dependencies"
+				});
 				return reply.status(500).send({
 					status: "failed",
 					message: "安装 connector 依赖失败",
@@ -193,6 +228,12 @@ app.post("/internal/run-import", async (request, reply) => {
 				});
 			}
 		}
+
+		await postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, {
+			eventType: "runner_setup",
+			level: "info",
+			message: "launching connector entrypoint"
+		});
 
 		const runResult = await new Promise<{ exitCode: number | null; stdout: string; stderr: string }>((resolvePromise) => {
 			const child = spawn(venvPython, [entrypoint], {

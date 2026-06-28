@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -67,18 +68,6 @@ if __name__ == "__main__":
     source_name = str(input_json.get("source_name", "xet-source"))
     program_title = str(input_json.get("program_title", "XET 节目"))
     script_path = str(input_json.get("script_path", "scripts/xet.py"))
-    qr_confirmed = bool(input_json.get("qr_confirmed", False))
-
-    if not qr_confirmed:
-        emit(
-            {
-                "type": "auth_required",
-                "kind": "qr_interactive",
-                "label": "请在外部终端完成 xet.py 两次扫码登录后，提交 qr_confirmed=true 再继续",
-            }
-        )
-        emit({"type": "log", "level": "info", "message": "waiting for manual qr confirmation"})
-        raise SystemExit(0)
 
     connector_root = Path.cwd()
     script_abs = connector_root / script_path
@@ -89,16 +78,53 @@ if __name__ == "__main__":
     cmd = [sys.executable, str(script_abs)]
     env = os.environ.copy()
     env["PODCAST_HUB_OUTPUT_MEDIA_DIR"] = str(media_root)
+    env["PYTHONUNBUFFERED"] = "1"
 
-    result = subprocess.run(cmd, cwd=str(connector_root), env=env, capture_output=True, text=True)
-    if result.stdout.strip():
-        emit({"type": "log", "level": "info", "message": result.stdout.strip()[:2000]})
-    if result.stderr.strip():
-        emit({"type": "log", "level": "warn", "message": result.stderr.strip()[:2000]})
+    emit({"type": "log", "level": "info", "message": f"starting xet script: {script_path}"})
+    emit({"type": "log", "level": "info", "message": f"output media dir: {media_root}"})
 
-    if result.returncode != 0:
-        emit({"type": "log", "level": "error", "message": f"script exited with code {result.returncode}"})
-        raise SystemExit(result.returncode)
+    if cmd[0].endswith("python") or cmd[0].endswith("python3"):
+        cmd.insert(1, "-u")
+
+    process = subprocess.Popen(
+        cmd,
+        cwd=str(connector_root),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+
+    stdout_lines = []
+    stderr_lines = []
+
+    def stream_pipe(pipe, level, collector):
+        if pipe is None:
+            return
+        for line in iter(pipe.readline, ""):
+            stripped = line.rstrip("\n")
+            if not stripped:
+                continue
+            collector.append(stripped)
+            emit({"type": "log", "level": level, "message": stripped[:4000]})
+
+    stdout_thread = threading.Thread(target=stream_pipe, args=(process.stdout, "info", stdout_lines), daemon=True)
+    stderr_thread = threading.Thread(target=stream_pipe, args=(process.stderr, "warn", stderr_lines), daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    process.wait()
+    stdout_thread.join(timeout=1)
+    stderr_thread.join(timeout=1)
+
+    if process.stdout:
+        process.stdout.close()
+    if process.stderr:
+        process.stderr.close()
+
+    if process.returncode != 0:
+        emit({"type": "log", "level": "error", "message": f"script exited with code {process.returncode}"})
+        raise SystemExit(process.returncode)
 
     external_program_id = f"xet:{source_name}"
     emit(

@@ -20,9 +20,15 @@ export async function adminConnectorRoutes(app: FastifyInstance): Promise<void> 
 
     const rows = await app.pg.query(
       `select c.id, c.name, c.display_name, c.status, c.updated_at,
-              cv.id as latest_version_id, cv.version as latest_version
+              cv.id as latest_version_id, cv.version as latest_version,
+              coalesce(source_usage.source_count, 0)::int as source_count
        from connectors c
        left join connector_versions cv on cv.id = c.latest_version_id
+       left join lateral (
+         select count(*) as source_count
+         from connector_sources s
+         where s.connector_id = c.id
+       ) source_usage on true
        order by c.updated_at desc`
     );
 
@@ -34,6 +40,8 @@ export async function adminConnectorRoutes(app: FastifyInstance): Promise<void> 
         status: row.status,
         latestVersionId: row.latest_version_id,
         latestVersion: row.latest_version,
+        sourceCount: row.source_count,
+        inUse: row.source_count > 0,
         updatedAt: row.updated_at
       }))
     };
@@ -160,9 +168,15 @@ export async function adminConnectorRoutes(app: FastifyInstance): Promise<void> 
     const { connectorId } = z.object({ connectorId: z.string().uuid() }).parse(request.params);
 
     const connectorRes = await app.pg.query(
-      `select id, name, display_name, status, created_at, updated_at, latest_version_id
-       from connectors
-       where id = $1`,
+      `select c.id, c.name, c.display_name, c.status, c.created_at, c.updated_at, c.latest_version_id,
+              coalesce(source_usage.source_count, 0)::int as source_count
+       from connectors c
+       left join lateral (
+         select count(*) as source_count
+         from connector_sources s
+         where s.connector_id = c.id
+       ) source_usage on true
+       where c.id = $1`,
       [connectorId]
     );
 
@@ -171,10 +185,16 @@ export async function adminConnectorRoutes(app: FastifyInstance): Promise<void> 
     }
 
     const versionsRes = await app.pg.query(
-      `select id, version, status, manifest_json, created_at
-       from connector_versions
-       where connector_id = $1
-       order by created_at desc`,
+      `select cv.id, cv.version, cv.status, cv.manifest_json, cv.created_at,
+              coalesce(source_usage.source_count, 0)::int as source_count
+       from connector_versions cv
+       left join lateral (
+         select count(*) as source_count
+         from connector_sources s
+         where s.connector_version_id = cv.id
+       ) source_usage on true
+       where cv.connector_id = $1
+       order by cv.created_at desc`,
       [connectorId]
     );
 
@@ -194,10 +214,14 @@ export async function adminConnectorRoutes(app: FastifyInstance): Promise<void> 
       displayName: connector.display_name,
       status: connector.status,
       latestVersionId: connector.latest_version_id,
+      sourceCount: connector.source_count,
+      inUse: connector.source_count > 0,
       versions: versionsRes.rows.map((row) => ({
         id: row.id,
         version: row.version,
         status: row.status,
+        sourceCount: row.source_count,
+        inUse: row.source_count > 0,
         manifest: row.manifest_json,
         createdAt: row.created_at
       })),
@@ -278,6 +302,12 @@ export async function adminConnectorRoutes(app: FastifyInstance): Promise<void> 
     const connectorRes = await app.pg.query("select id from connectors where id = $1", [connectorId]);
     if ((connectorRes.rowCount ?? 0) === 0) {
       return reply.status(404).send({ message: "Connector 不存在" });
+    }
+
+    const sourceUsageRes = await app.pg.query("select count(*)::int as source_count from connector_sources where connector_id = $1", [connectorId]);
+    const sourceCount = Number(sourceUsageRes.rows[0]?.source_count ?? 0);
+    if (sourceCount > 0) {
+      return reply.status(409).send({ message: `Connector 正被 ${sourceCount} 个 Source 使用，不能删除` });
     }
 
     await app.pg.query("delete from connectors where id = $1", [connectorId]);

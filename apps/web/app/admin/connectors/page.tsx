@@ -10,6 +10,8 @@ type Connector = {
   status: string;
   latestVersionId?: string | null;
   latestVersion: string | null;
+  sourceCount: number;
+  inUse: boolean;
 };
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
@@ -56,7 +58,7 @@ export default function AdminConnectorsPage() {
   }
 
   async function deleteConnector(connectorId: string, displayName: string) {
-    if (!confirm(`确认删除 Connector「${displayName}」吗？该操作会同时删除关联 Source。`)) {
+    if (!confirm(`确认删除 Connector「${displayName}」吗？只有未被 Source 使用的 Connector 可以删除。`)) {
       return;
     }
 
@@ -91,6 +93,7 @@ export default function AdminConnectorsPage() {
               <p className="text-xs text-muted">{item.name}</p>
               <p className="break-all text-xs text-muted">Connector ID：{item.id}</p>
               <p className="text-xs text-muted">状态：{item.status}</p>
+              <p className="text-xs text-muted">使用状态：{item.inUse ? `在用（${item.sourceCount} 个 Source）` : "未使用"}</p>
               <p className="text-xs text-muted">最新版本：{item.latestVersion ?? "-"}</p>
               <p className="break-all text-xs text-muted">最新版本 ID：{item.latestVersionId ?? "-"}</p>
             </div>
@@ -101,7 +104,12 @@ export default function AdminConnectorsPage() {
               <button className="button-secondary" onClick={() => disableConnector(item.id)}>
                 停用
               </button>
-              <button className="button-secondary" onClick={() => deleteConnector(item.id, item.displayName)}>
+              <button
+                className="button-secondary disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={item.inUse}
+                onClick={() => deleteConnector(item.id, item.displayName)}
+                title={item.inUse ? "仍有 Source 使用，不能删除" : "删除 Connector"}
+              >
                 删除
               </button>
               <Link className="text-sm text-accent" href={`/admin/connectors/${item.id}`}>

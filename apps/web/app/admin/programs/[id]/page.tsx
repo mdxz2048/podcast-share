@@ -22,19 +22,19 @@ type VisibilityDetail = {
 type AudienceGroup = { id: string; name: string };
 type UserItem = { id: string; email: string };
 
-function toIdsText(items: Array<{ id: string }>): string {
-  return items.map((item) => item.id).join("\n");
+function toIds(items: Array<{ id: string }>): string[] {
+  return items.map((item) => item.id);
 }
 
-function parseIdsText(value: string): string[] {
-  return Array.from(new Set(value.split(/[\n,\s]+/).map((item) => item.trim()).filter(Boolean)));
+function toggleId(items: string[], id: string): string[] {
+  return items.includes(id) ? items.filter((item) => item !== id) : [...items, id];
 }
 
 export default function AdminProgramDetailPage({ params }: { params: { id: string } }) {
   const [program, setProgram] = useState<ProgramDetail | null>(null);
   const [mode, setMode] = useState<VisibilityMode>("closed");
-  const [audienceGroupIdsText, setAudienceGroupIdsText] = useState("");
-  const [userIdsText, setUserIdsText] = useState("");
+  const [selectedAudienceGroupIds, setSelectedAudienceGroupIds] = useState<string[]>([]);
+  const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [groups, setGroups] = useState<AudienceGroup[]>([]);
   const [users, setUsers] = useState<UserItem[]>([]);
   const [message, setMessage] = useState("加载中...");
@@ -72,8 +72,8 @@ export default function AdminProgramDetailPage({ params }: { params: { id: strin
     const visibility = visibilityJson as VisibilityDetail;
     setProgram(programJson as ProgramDetail);
     setMode(visibility.visibilityMode);
-    setAudienceGroupIdsText(toIdsText(visibility.audienceGroups));
-    setUserIdsText(toIdsText(visibility.users));
+    setSelectedAudienceGroupIds(toIds(visibility.audienceGroups));
+    setSelectedUserIds(toIds(visibility.users));
 
     setGroups((groupsJson.items ?? []).map((item: any) => ({ id: item.id, name: item.name })));
     setUsers((usersJson.items ?? []).map((item: any) => ({ id: item.id, email: item.email })));
@@ -94,10 +94,10 @@ export default function AdminProgramDetailPage({ params }: { params: { id: strin
     };
 
     if (mode === "audience_groups") {
-      payload.audienceGroupIds = parseIdsText(audienceGroupIdsText);
+      payload.audienceGroupIds = selectedAudienceGroupIds;
     }
     if (mode === "specific_users") {
-      payload.userIds = parseIdsText(userIdsText);
+      payload.userIds = selectedUserIds;
     }
 
     const res = await fetch(`${apiBase}/admin/programs/${params.id}/visibility`, {
@@ -132,40 +132,48 @@ export default function AdminProgramDetailPage({ params }: { params: { id: strin
       <div className="card space-y-3">
         <label className="text-sm">可见范围</label>
         <select className="input" value={mode} onChange={(event) => setMode(event.target.value as VisibilityMode)}>
-          <option value="closed">closed</option>
-          <option value="all_registered_users">all_registered_users</option>
-          <option value="audience_groups">audience_groups</option>
-          <option value="specific_users">specific_users</option>
+          <option value="closed">不开放</option>
+          <option value="all_registered_users">所有注册用户</option>
+          <option value="audience_groups">指定用户类别</option>
+          <option value="specific_users">指定用户</option>
         </select>
 
         {mode === "audience_groups" ? (
-          <>
-            <p className="text-xs text-muted">每行一个 audience_group_id</p>
-            <textarea className="input min-h-28" value={audienceGroupIdsText} onChange={(event) => setAudienceGroupIdsText(event.target.value)} />
-            <p className="text-xs text-muted">可选用户类别：</p>
-            <div className="space-y-1">
+          <div className="space-y-2">
+            <p className="text-xs text-muted">可多选用户类别</p>
+            <div className="grid gap-2 sm:grid-cols-2">
               {groups.map((group) => (
-                <p className="text-xs text-muted" key={group.id}>
-                  {group.name}: {group.id}
-                </p>
+                <label className="flex items-center gap-2 rounded border border-line px-3 py-2 text-sm" key={group.id}>
+                  <input
+                    checked={selectedAudienceGroupIds.includes(group.id)}
+                    onChange={() => setSelectedAudienceGroupIds((current) => toggleId(current, group.id))}
+                    type="checkbox"
+                  />
+                  <span>{group.name}</span>
+                </label>
               ))}
             </div>
-          </>
+            {groups.length === 0 ? <p className="text-xs text-muted">暂无用户类别</p> : null}
+          </div>
         ) : null}
 
         {mode === "specific_users" ? (
-          <>
-            <p className="text-xs text-muted">每行一个 user_id</p>
-            <textarea className="input min-h-28" value={userIdsText} onChange={(event) => setUserIdsText(event.target.value)} />
-            <p className="text-xs text-muted">可选用户：</p>
-            <div className="space-y-1">
-              {users.slice(0, 50).map((user) => (
-                <p className="text-xs text-muted" key={user.id}>
-                  {user.email}: {user.id}
-                </p>
+          <div className="space-y-2">
+            <p className="text-xs text-muted">可多选用户</p>
+            <div className="grid max-h-80 gap-2 overflow-auto sm:grid-cols-2">
+              {users.map((user) => (
+                <label className="flex items-center gap-2 rounded border border-line px-3 py-2 text-sm" key={user.id}>
+                  <input
+                    checked={selectedUserIds.includes(user.id)}
+                    onChange={() => setSelectedUserIds((current) => toggleId(current, user.id))}
+                    type="checkbox"
+                  />
+                  <span className="min-w-0 truncate">{user.email}</span>
+                </label>
               ))}
             </div>
-          </>
+            {users.length === 0 ? <p className="text-xs text-muted">暂无用户</p> : null}
+          </div>
         ) : null}
 
         <button className="button" onClick={submitVisibility}>

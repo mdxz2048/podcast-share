@@ -1,7 +1,10 @@
 import { FastifyInstance } from "fastify";
+import { dirname, resolve, sep } from "node:path";
+import { rmdir, unlink } from "node:fs/promises";
 import { z } from "zod";
 import { decryptSecret, encryptSecret } from "../utils/secrets.js";
 import { executeSourceImport } from "../services/job-execution.js";
+import { env } from "../config.js";
 
 function assertAdmin(request: { user: { id: string; isAdmin: boolean } | null }, reply: any): request is { user: { id: string; isAdmin: boolean } } {
   if (!request.user || !request.user.isAdmin) {
@@ -64,6 +67,55 @@ function computeNextRunAt(scheduleType: string, cronExpression: string | null): 
   return new Date(now.getTime() + 60 * 60 * 1000);
 }
 
+function resolveMediaPath(storageKey: string): string | null {
+  const mediaRoot = resolve(process.cwd(), env.MEDIA_LOCAL_ROOT);
+  const absolutePath = resolve(mediaRoot, storageKey);
+  if (absolutePath !== mediaRoot && absolutePath.startsWith(`${mediaRoot}${sep}`)) {
+    return absolutePath;
+  }
+  return null;
+}
+
+async function pruneEmptyMediaDirs(startDir: string): Promise<void> {
+  const mediaRoot = resolve(process.cwd(), env.MEDIA_LOCAL_ROOT);
+  let currentDir = startDir;
+
+  while (currentDir !== mediaRoot && currentDir.startsWith(`${mediaRoot}${sep}`)) {
+    try {
+      await rmdir(currentDir);
+    } catch {
+      return;
+    }
+    currentDir = dirname(currentDir);
+  }
+}
+
+async function deleteLocalMediaFiles(storageKeys: string[]): Promise<{ deleted: number; failed: number }> {
+  let deleted = 0;
+  let failed = 0;
+
+  for (const storageKey of Array.from(new Set(storageKeys))) {
+    const absolutePath = resolveMediaPath(storageKey);
+    if (!absolutePath) {
+      failed += 1;
+      continue;
+    }
+
+    try {
+      await unlink(absolutePath);
+      deleted += 1;
+      await pruneEmptyMediaDirs(dirname(absolutePath));
+    } catch (error: any) {
+      if (error?.code === "ENOENT") {
+        continue;
+      }
+      failed += 1;
+    }
+  }
+
+  return { deleted, failed };
+}
+
 export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
   app.get("/admin/sources", async (request, reply) => {
     if (!assertAdmin(request, reply)) {
@@ -74,10 +126,25 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
       `select s.id, s.name, s.enabled, s.auth_status, s.auth_unattended_ready, s.run_policy,
               s.last_success_sync_at, s.last_job_status, s.created_at, s.updated_at,
               c.id as connector_id, c.name as connector_name, c.display_name as connector_display_name,
-              cv.id as connector_version_id, cv.version as connector_version
+              cv.id as connector_version_id, cv.version as connector_version,
+              active_job.id as active_job_id, active_job.status as active_job_status,
+              coalesce(job_usage.job_count, 0)::int as job_count
        from connector_sources s
        join connectors c on c.id = s.connector_id
        join connector_versions cv on cv.id = s.connector_version_id
+       left join lateral (
+         select j.id, j.status
+         from import_jobs j
+         where j.source_id = s.id
+           and j.status in ('queued', 'running', 'waiting_for_input', 'waiting_for_auth')
+         order by j.created_at desc
+         limit 1
+       ) active_job on true
+       left join lateral (
+         select count(*) as job_count
+         from import_jobs j
+         where j.source_id = s.id
+       ) job_usage on true
        order by s.updated_at desc`
     );
 
@@ -91,6 +158,14 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
         runPolicy: row.run_policy,
         lastSuccessSyncAt: row.last_success_sync_at,
         lastJobStatus: row.last_job_status,
+        jobCount: row.job_count,
+        activeJob: row.active_job_id
+          ? {
+              id: row.active_job_id,
+              status: row.active_job_status
+            }
+          : null,
+        inUse: Boolean(row.active_job_id),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
         connector: {
@@ -621,7 +696,52 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(404).send({ message: "Source 不存在" });
     }
 
-    await app.pg.query("delete from connector_sources where id = $1", [sourceId]);
-    return { message: "Source 已删除" };
+    const activeJobRes = await app.pg.query(
+      `select id, status
+       from import_jobs
+       where source_id = $1
+         and status in ('queued', 'running', 'waiting_for_input', 'waiting_for_auth')
+       order by created_at desc
+       limit 1`,
+      [sourceId]
+    );
+    if ((activeJobRes.rowCount ?? 0) > 0) {
+      const activeJob = activeJobRes.rows[0];
+      return reply.status(409).send({ message: `Source 正在被任务 ${activeJob.id} 使用（${activeJob.status}），不能删除` });
+    }
+
+    const mediaRes = await app.pg.query(
+      `select m.storage_key
+       from media_assets m
+       join episodes e on e.id = m.episode_id
+       join programs p on p.id = e.program_id
+       where p.source_id = $1 and m.storage_provider = 'local'`,
+      [sourceId]
+    );
+    const programCountRes = await app.pg.query("select count(*)::int as program_count from programs where source_id = $1", [sourceId]);
+    const mediaKeys = mediaRes.rows.map((row) => String(row.storage_key));
+    const programCount = Number(programCountRes.rows[0]?.program_count ?? 0);
+
+    await app.pg.query("begin");
+    try {
+      await app.pg.query("delete from programs where source_id = $1", [sourceId]);
+      await app.pg.query("delete from connector_sources where id = $1", [sourceId]);
+      await app.pg.query("commit");
+    } catch (error) {
+      await app.pg.query("rollback");
+      throw error;
+    }
+
+    const fileSummary = await deleteLocalMediaFiles(mediaKeys);
+    if (fileSummary.failed > 0) {
+      app.log.warn({ sourceId, failed: fileSummary.failed }, "failed to delete some source media files");
+    }
+
+    return {
+      message: "Source 已删除",
+      deletedPrograms: programCount,
+      deletedMediaFiles: fileSummary.deleted,
+      failedMediaFiles: fileSummary.failed
+    };
   });
 }

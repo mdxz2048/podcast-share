@@ -10,6 +10,12 @@ type Source = {
   name: string;
   enabled: boolean;
   authStatus: string;
+  jobCount: number;
+  inUse: boolean;
+  activeJob: {
+    id: string;
+    status: string;
+  } | null;
   connector: {
     displayName: string;
     version: string;
@@ -153,12 +159,21 @@ export default function AdminSourcesPage() {
               <p className="text-xs text-muted">版本：{item.connector.version}</p>
               <p className="text-xs text-muted">认证状态：{item.authStatus}</p>
               <p className="text-xs text-muted">启用状态：{item.enabled ? "已启用" : "未启用"}</p>
+              <p className="text-xs text-muted">
+                使用状态：{item.inUse && item.activeJob ? `任务运行中（${item.activeJob.status}）` : "空闲"}
+              </p>
+              <p className="text-xs text-muted">历史任务数：{item.jobCount}</p>
             </div>
             <div className="flex items-center gap-2">
               <button className="button-secondary" onClick={() => toggleEnabled(item.id, !item.enabled)}>
                 {item.enabled ? "停用" : "启用"}
               </button>
-              <button className="button-secondary" onClick={() => deleteSource(item.id, item.name)}>
+              <button
+                className="button-secondary disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={item.inUse}
+                onClick={() => deleteSource(item.id, item.name)}
+                title={item.inUse ? "Source 有活动任务，不能删除" : "删除 Source"}
+              >
                 删除
               </button>
               <Link className="text-sm text-accent" href={`/admin/sources/${item.id}`}>

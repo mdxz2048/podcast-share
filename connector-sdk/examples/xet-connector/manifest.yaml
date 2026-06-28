@@ -29,11 +29,6 @@ inputs:
     type: text
     required: true
     default: scripts/xet.py
-  - key: qr_confirmed
-    label: 已在外部终端完成本次扫码
-    type: boolean
-    required: false
-    default: false
 output:
   protocol: podcast-hub-jsonl-v1
   media_root: /work/output/media

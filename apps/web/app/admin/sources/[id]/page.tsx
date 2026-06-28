@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
@@ -16,6 +17,7 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
   const [secretConfigText, setSecretConfigText] = useState("{}");
   const [message, setMessage] = useState("加载中...");
   const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalFullscreen, setTerminalFullscreen] = useState(false);
   const [activeJobId, setActiveJobId] = useState("");
   const [activeJobStatus, setActiveJobStatus] = useState("");
   const [terminalLine, setTerminalLine] = useState("");
@@ -100,6 +102,17 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
     setTerminalOpen(true);
     await loadJob(active.id);
     return true;
+  }
+
+  async function openActiveJobTerminalWithRetry(attempts = 6, waitMs = 1000): Promise<boolean> {
+    for (let i = 0; i < attempts; i += 1) {
+      const opened = await openActiveJobTerminal();
+      if (opened) {
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+    return false;
   }
 
   async function loadJob(jobId: string) {
@@ -224,30 +237,53 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
   }
 
   async function runNow() {
-    const res = await fetch(`${apiBase}/admin/sources/${params.id}/run`, {
-      method: "POST",
-      credentials: "include"
-    });
-    const json = await res.json();
-    if (!res.ok) {
-      const text = String(json.message ?? "运行失败");
-      if (res.status === 400 && text.includes("running job")) {
-        const opened = await openActiveJobTerminal();
+    setMessage("正在启动任务并连接运行终端...");
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+
+    try {
+      const res = await fetch(`${apiBase}/admin/sources/${params.id}/run`, {
+        method: "POST",
+        credentials: "include",
+        signal: controller.signal
+      });
+      const json = await res.json();
+
+      if (!res.ok) {
+        const text = String(json.message ?? "运行失败");
+        if (res.status === 400 && text.includes("running job")) {
+          const opened = await openActiveJobTerminalWithRetry();
+          if (opened) {
+            setMessage("该 Source 已有运行中的任务，已为你打开运行终端。");
+            return;
+          }
+        }
+        setMessage(json.message ?? "运行失败");
+        return;
+      }
+
+      setMessage(`任务已执行，状态：${json.status}，Job ID: ${json.jobId}`);
+      setActiveJobId(json.jobId ?? "");
+      setActiveJobStatus(json.status ?? "");
+      setTerminalOpen(true);
+      if (json.jobId) {
+        const detail = await loadJob(json.jobId);
+        await autoResumeQrIfNeeded(json.jobId, detail);
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        const opened = await openActiveJobTerminalWithRetry();
         if (opened) {
-          setMessage("该 Source 已有运行中的任务，已为你打开运行终端。");
+          setMessage("任务已启动，正在显示实时输出...");
           return;
         }
+        setMessage("任务可能已启动，但暂未检索到运行中的 Job，请稍后重试打开终端。");
+        return;
       }
-      setMessage(json.message ?? "运行失败");
-      return;
-    }
-    setMessage(`任务已执行，状态：${json.status}，Job ID: ${json.jobId}`);
-    setActiveJobId(json.jobId ?? "");
-    setActiveJobStatus(json.status ?? "");
-    setTerminalOpen(true);
-    if (json.jobId) {
-      const detail = await loadJob(json.jobId);
-      await autoResumeQrIfNeeded(json.jobId, detail);
+      setMessage(error instanceof Error ? error.message : "运行失败");
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
@@ -311,11 +347,145 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
     level: string | null;
     message: string | null;
   }): string {
-    const ts = event.created_at ? `[${event.created_at}]` : "";
+    const msg = event.message ?? "";
+    if (event.event_type === "runner_stdout" || event.event_type === "runner_stderr") {
+      try {
+        const parsed = JSON.parse(msg) as { message?: unknown };
+        if (typeof parsed.message === "string") {
+          return parsed.message;
+        }
+      } catch {
+        // Raw process output is already the best terminal representation.
+      }
+      return msg;
+    }
+
     const typ = event.event_type ? `[${event.event_type}]` : "";
     const lvl = event.level ? `[${event.level}]` : "";
-    const msg = event.message ?? "";
-    return `${ts}${typ}${lvl} ${msg}`.trim();
+    return `${typ}${lvl} ${msg}`.trim();
+  }
+
+  function isRunnerOutput(event: { event_type: string }) {
+    return event.event_type === "runner_stdout" || event.event_type === "runner_stderr";
+  }
+
+  function isBlockQrLine(line: string) {
+    const blockCount = (line.match(/[▀▄█]/g) ?? []).length;
+    return blockCount >= 3 && line.length >= 20;
+  }
+
+  function renderQrBlock(lines: string[], key: string) {
+    return (
+      <pre
+        className="my-1 w-max whitespace-pre font-normal tracking-normal text-slate-100"
+        key={key}
+        style={{
+          fontFamily: "Menlo, Monaco, Consolas, 'Courier New', monospace",
+          fontSize: "14px",
+          letterSpacing: "0",
+          lineHeight: "16.8px",
+          tabSize: 8
+        }}
+      >
+        {lines.join("\n")}
+      </pre>
+    );
+  }
+
+  function renderTextEvent(
+    event: {
+      created_at: string;
+      event_type: string;
+      level: string | null;
+      message: string | null;
+    },
+    index: number
+  ) {
+    const line = formatEventLine(event);
+    return (
+      <p
+        className={`font-mono tracking-normal ${
+          isRunnerOutput(event) ? "w-max whitespace-pre leading-none" : "whitespace-pre-wrap leading-5"
+        }`}
+        key={`${event.created_at}-${index}`}
+      >
+        {line}
+      </p>
+    );
+  }
+
+  function renderQrImageEvent(
+    event: {
+      created_at: string;
+      message: string | null;
+      payload_json?: Record<string, unknown> | null;
+    },
+    index: number
+  ) {
+    const connectorEvent = event.payload_json?.connectorEvent as { image_data_url?: unknown } | undefined;
+    const imageDataUrl =
+      typeof event.payload_json?.image_data_url === "string"
+        ? event.payload_json.image_data_url
+        : typeof connectorEvent?.image_data_url === "string"
+          ? connectorEvent.image_data_url
+          : "";
+
+    if (!imageDataUrl) {
+      return renderTextEvent(
+        {
+          created_at: event.created_at,
+          event_type: "qr_image",
+          level: "info",
+          message: event.message ?? "QR image is unavailable"
+        },
+        index
+      );
+    }
+
+    return (
+      <div className="my-2 w-max rounded-md bg-white p-4 text-slate-950" key={`${event.created_at}-${index}`}>
+        <p className="mb-2 text-sm font-medium">{event.message ?? "Scan this QR code with WeChat."}</p>
+        <img alt={event.message ?? "QR code"} className="block h-auto w-[360px] max-w-none bg-white" src={imageDataUrl} />
+      </div>
+    );
+  }
+
+  function renderTerminalEvents() {
+    const nodes: ReactNode[] = [];
+    let qrLines: string[] = [];
+    let qrStartKey = "";
+
+    const flushQr = () => {
+      if (qrLines.length === 0) {
+        return;
+      }
+      nodes.push(renderQrBlock(qrLines, qrStartKey));
+      qrLines = [];
+      qrStartKey = "";
+    };
+
+    jobEvents.forEach((event, index) => {
+      if (event.event_type === "qr_image") {
+        flushQr();
+        nodes.push(renderQrImageEvent(event, index));
+        return;
+      }
+
+      const line = formatEventLine(event);
+      if (isRunnerOutput(event) && isBlockQrLine(line)) {
+        if (qrLines.length === 0) {
+          qrStartKey = `${event.created_at}-${index}`;
+        }
+        qrLines.push(line);
+        return;
+      }
+
+      flushQr();
+      nodes.push(renderTextEvent(event, index));
+    });
+
+    flushQr();
+    return nodes;
   }
 
   async function updateAuthProfile() {
@@ -449,12 +619,21 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
 
       {terminalOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4">
-          <div className="h-[90vh] w-full max-w-6xl rounded-lg border border-line bg-white p-4 shadow-xl">
+          <div
+            className={`w-full rounded-lg border border-line bg-white p-4 shadow-xl ${
+              terminalFullscreen ? "h-[98vh] max-w-none" : "h-[90vh] max-w-6xl"
+            }`}
+          >
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-base font-medium">Connector 运行终端</h2>
-              <button className="button-secondary" onClick={() => setTerminalOpen(false)}>
-                关闭
-              </button>
+              <div className="flex gap-2">
+                <button className="button-secondary" onClick={() => setTerminalFullscreen((prev) => !prev)}>
+                  {terminalFullscreen ? "退出全屏" : "全屏"}
+                </button>
+                <button className="button-secondary" onClick={() => setTerminalOpen(false)}>
+                  关闭
+                </button>
+              </div>
             </div>
             <p className="mb-2 text-xs text-muted">Job ID: {activeJobId || "-"}</p>
             <p className="mb-3 text-xs text-muted">状态: {activeJobStatus || "-"}</p>
@@ -462,7 +641,9 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
             <div
               ref={terminalBodyRef}
               tabIndex={0}
-              className="relative mb-3 h-[64vh] overflow-y-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100 outline-none"
+              className={`relative mb-3 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100 outline-none ${
+                terminalFullscreen ? "h-[86vh]" : "h-[64vh]"
+              }`}
               onClick={focusTerminalInput}
             >
               <textarea
@@ -487,12 +668,8 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
                 className="absolute left-0 top-0 h-px w-px opacity-0"
               />
               {jobEvents.length === 0 ? <p className="text-slate-300">暂无输出...</p> : null}
-              {jobEvents.map((event, index) => (
-                <p className="whitespace-pre-wrap font-mono" key={`${event.created_at}-${index}`}>
-                  {formatEventLine(event)}
-                </p>
-              ))}
-              <p className="font-mono text-emerald-300">$ {terminalLine}<span className="animate-pulse">_</span></p>
+              {renderTerminalEvents()}
+              <p className="w-max whitespace-pre font-mono leading-none text-emerald-300">$ {terminalLine}<span className="animate-pulse">_</span></p>
             </div>
 
             <div className="flex gap-2">

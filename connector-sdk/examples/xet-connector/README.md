@@ -10,8 +10,8 @@
 
 ## 运行行为
 
-- 首次运行（或每次需要扫码时）若 `qr_confirmed=false`，connector 会发出 `auth_required` 事件并退出为等待态。
-- 管理员在外部终端完成两次扫码后，重新触发并提交 `qr_confirmed=true`。
+- 每次运行都会直接执行 `scripts/xet.py`。
+- `xet.py` 的标准输出和错误输出会实时转发为日志事件，便于在后台终端弹窗中看到二维码与进度信息。
 - 脚本执行后，connector 会扫描 `CONNECTOR_OUTPUT_ROOT/media` 下的音频文件并转换为网站支持的 JSONL 事件。
 
 ## 对 xet.py 的最小要求
