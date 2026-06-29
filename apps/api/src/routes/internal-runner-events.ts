@@ -1,6 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { env } from "../config.js";
+import { applyAuthUpdateEvent } from "../services/import-processing.js";
 
 const payloadSchema = z.object({
   eventType: z.string().min(1).max(64),
@@ -18,6 +19,21 @@ function normalizeRunnerEvent(body: z.infer<typeof payloadSchema>) {
   try {
     const parsed = JSON.parse(body.message) as { type?: unknown; level?: unknown; message?: unknown };
     if (typeof parsed.message === "string") {
+      if (parsed.type === "auth_update") {
+        return {
+          eventType: "auth_update",
+          level: typeof parsed.level === "string" ? parsed.level : body.level,
+          message: parsed.message,
+          payload: {
+            ...payload,
+            ...parsed,
+            value: "[redacted]",
+            secret_value: "[redacted]"
+          },
+          sensitiveEvent: parsed
+        };
+      }
+
       if (parsed.type === "qr_image") {
         return {
           eventType: "qr_image",
@@ -55,9 +71,11 @@ export async function internalRunnerEventRoutes(app: FastifyInstance): Promise<v
     }
 
     const { jobId } = z.object({ jobId: z.string().uuid() }).parse(request.params);
-    const body = normalizeRunnerEvent(payloadSchema.parse(request.body));
+    const body = normalizeRunnerEvent(payloadSchema.parse(request.body)) as ReturnType<typeof normalizeRunnerEvent> & {
+      sensitiveEvent?: Record<string, unknown>;
+    };
 
-    const jobRes = await app.pg.query("select id from import_jobs where id = $1", [jobId]);
+    const jobRes = await app.pg.query("select id, source_id from import_jobs where id = $1", [jobId]);
     if ((jobRes.rowCount ?? 0) === 0) {
       return reply.status(404).send({ message: "job not found" });
     }
@@ -67,6 +85,10 @@ export async function internalRunnerEventRoutes(app: FastifyInstance): Promise<v
        values (gen_random_uuid(), $1, $2, $3, $4, $5::jsonb, now())`,
       [jobId, body.eventType, body.level ?? null, body.message ?? null, JSON.stringify(body.payload)]
     );
+
+    if (body.eventType === "auth_update" && body.sensitiveEvent) {
+      await applyAuthUpdateEvent(app, jobRes.rows[0].source_id, body.sensitiveEvent);
+    }
 
     return { ok: true };
   });

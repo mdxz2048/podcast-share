@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
 
@@ -54,6 +55,7 @@ type JobEvent = {
   event_type: string;
   level: string | null;
   message: string | null;
+  payload_json?: Record<string, unknown> | null;
 };
 
 type ConnectorOption = {
@@ -73,6 +75,44 @@ export default function AdminSourcesPage() {
   const [expandedSourceId, setExpandedSourceId] = useState("");
   const [jobsBySource, setJobsBySource] = useState<Record<string, Job[]>>({});
   const [logJob, setLogJob] = useState<{ id: string; status: string; events: JobEvent[] } | null>(null);
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalFullscreen, setTerminalFullscreen] = useState(false);
+  const [activeJobId, setActiveJobId] = useState("");
+  const [activeJobStatus, setActiveJobStatus] = useState("");
+  const [terminalLine, setTerminalLine] = useState("");
+  const [jobEvents, setJobEvents] = useState<JobEvent[]>([]);
+  const terminalBodyRef = useRef<HTMLDivElement | null>(null);
+  const terminalInputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  function focusTerminalInput() {
+    terminalInputRef.current?.focus();
+  }
+
+  function parseShellLiteral(value: string): unknown {
+    const lower = value.toLowerCase();
+    if (lower === "true") return true;
+    if (lower === "false") return false;
+    if (lower === "null") return null;
+    const numeric = Number(value);
+    if (!Number.isNaN(numeric) && value.trim() !== "") return numeric;
+    return value;
+  }
+
+  function parseTerminalLineToInput(line: string): Record<string, unknown> {
+    const trimmed = line.trim();
+    if (!trimmed) return {};
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (typeof parsed === "object" && parsed !== null) return parsed as Record<string, unknown>;
+      return { input: parsed };
+    } catch {
+      const assignment = trimmed.match(/^([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*(.+)$/);
+      if (assignment) {
+        return { [assignment[1]]: parseShellLiteral(assignment[2]) };
+      }
+      return { input: trimmed };
+    }
+  }
 
   async function load() {
     const res = await fetch(`${apiBase}/admin/sources`, { credentials: "include" });
@@ -145,6 +185,136 @@ export default function AdminSourcesPage() {
     setLogJob({ id: jobId, status: json.status ?? "", events: json.events ?? [] });
   }
 
+  async function loadJob(jobId: string) {
+    const res = await fetch(`${apiBase}/admin/jobs/${jobId}`, { credentials: "include" });
+    const json = await res.json();
+    if (!res.ok) {
+      setMessage(json.message ?? "任务详情加载失败");
+      return;
+    }
+    setActiveJobStatus(json.status ?? "");
+    setJobEvents(json.events ?? []);
+    return json as { status?: string; events?: JobEvent[] };
+  }
+
+  async function openJobTerminal(jobId: string, status = "") {
+    setActiveJobId(jobId);
+    setActiveJobStatus(status);
+    setTerminalOpen(true);
+    await loadJob(jobId);
+  }
+
+  async function openActiveJobTerminalForSource(sourceId: string, attempts = 6, waitMs = 1000) {
+    for (let i = 0; i < attempts; i += 1) {
+      const res = await fetch(`${apiBase}/admin/jobs?sourceId=${sourceId}`, { credentials: "include" });
+      const json = await res.json();
+      if (res.ok) {
+        const active = (json.items ?? []).find((job: Job) =>
+          ["queued", "running", "waiting_for_input", "waiting_for_auth"].includes(job.status)
+        );
+        if (active) {
+          await openJobTerminal(active.id, active.status);
+          return true;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+    return false;
+  }
+
+  async function runSourceNow(source: Source) {
+    if (source.activeJob) {
+      await openJobTerminal(source.activeJob.id, source.activeJob.status);
+      return;
+    }
+
+    setMessage("正在启动任务并连接运行终端...");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+
+    try {
+      const res = await fetch(`${apiBase}/admin/sources/${source.id}/run`, {
+        method: "POST",
+        credentials: "include",
+        signal: controller.signal
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        const text = String(json.message ?? "");
+        if (res.status === 400 && text.includes("running job")) {
+          const opened = await openActiveJobTerminalForSource(source.id);
+          if (opened) {
+            setMessage("该 Source 已有运行中的任务，已为你打开运行终端。");
+            return;
+          }
+        }
+        setMessage(json.message ?? "运行失败");
+        return;
+      }
+      setMessage(`任务已启动，Job ID: ${json.jobId}`);
+      if (json.jobId) {
+        await openJobTerminal(json.jobId, json.status ?? "");
+      }
+      await load();
+      if (expandedSourceId === source.id) {
+        await loadSourceJobs(source.id);
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        const opened = await openActiveJobTerminalForSource(source.id);
+        if (opened) {
+          setMessage("任务已启动，正在显示实时输出...");
+          return;
+        }
+        await load();
+        setMessage("任务可能已启动，但暂未检索到运行中的 Job，请稍后重试。");
+        return;
+      }
+      setMessage(error instanceof Error ? error.message : "运行失败");
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async function submitJobInput(text: string) {
+    if (!activeJobId) {
+      setMessage("当前没有可提交输入的任务");
+      return;
+    }
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    const res = await fetch(`${apiBase}/admin/jobs/${activeJobId}/submit-input`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ input: parseTerminalLineToInput(trimmed) })
+    });
+    const json = await res.json();
+    setMessage(json.message ?? (res.ok ? "输入已提交" : "提交失败"));
+    if (res.ok) {
+      setTerminalLine("");
+      await loadJob(activeJobId);
+    }
+  }
+
+  useEffect(() => {
+    if (!terminalOpen || !activeJobId) return;
+    const timer = setInterval(async () => {
+      await loadJob(activeJobId);
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [terminalOpen, activeJobId]);
+
+  useEffect(() => {
+    if (terminalOpen) focusTerminalInput();
+  }, [terminalOpen]);
+
+  useEffect(() => {
+    const view = terminalBodyRef.current;
+    if (view) view.scrollTop = view.scrollHeight;
+  }, [jobEvents, terminalLine]);
+
   function formatTime(value: string | null) {
     if (!value) {
       return "-";
@@ -171,6 +341,57 @@ export default function AdminSourcesPage() {
     }
 
     return `[${event.event_type}] ${message}`.trim();
+  }
+
+  function isRunnerOutput(event: JobEvent) {
+    return event.event_type === "runner_stdout" || event.event_type === "runner_stderr";
+  }
+
+  function renderTextEvent(event: JobEvent, index: number) {
+    const line = formatLogLine(event);
+    return (
+      <p
+        className={`font-mono tracking-normal ${
+          isRunnerOutput(event) ? "w-max whitespace-pre leading-none" : "whitespace-pre-wrap leading-5"
+        }`}
+        key={`${event.created_at}-${index}`}
+      >
+        {line}
+      </p>
+    );
+  }
+
+  function renderQrImageEvent(event: JobEvent, index: number) {
+    const connectorEvent = event.payload_json?.connectorEvent as { image_data_url?: unknown } | undefined;
+    const imageDataUrl =
+      typeof event.payload_json?.image_data_url === "string"
+        ? event.payload_json.image_data_url
+        : typeof connectorEvent?.image_data_url === "string"
+          ? connectorEvent.image_data_url
+          : "";
+
+    if (!imageDataUrl) {
+      return renderTextEvent(event, index);
+    }
+
+    return (
+      <div className="my-2 w-max rounded-md bg-white p-4 text-slate-950" key={`${event.created_at}-${index}`}>
+        <p className="mb-2 text-sm font-medium">{event.message ?? "Scan this QR code with WeChat."}</p>
+        <img alt={event.message ?? "QR code"} className="block h-auto w-[360px] max-w-none bg-white" src={imageDataUrl} />
+      </div>
+    );
+  }
+
+  function renderTerminalEvents() {
+    const nodes: ReactNode[] = [];
+    jobEvents.forEach((event, index) => {
+      if (event.event_type === "qr_image") {
+        nodes.push(renderQrImageEvent(event, index));
+      } else {
+        nodes.push(renderTextEvent(event, index));
+      }
+    });
+    return nodes;
   }
 
   async function deleteSource(sourceId: string, sourceName: string) {
@@ -299,6 +520,14 @@ export default function AdminSourcesPage() {
                   停用
                 </button>
                 <button
+                  className="button disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={!item.enabled || (item.inUse && !item.activeJob)}
+                  onClick={() => runSourceNow(item)}
+                  title={!item.enabled ? "Source 已停用，请先启用" : item.activeJob ? "查看当前运行终端" : "立即运行并打开终端"}
+                >
+                  {item.activeJob ? "查看终端" : "启动"}
+                </button>
+                <button
                   className="button-secondary disabled:cursor-not-allowed disabled:opacity-50"
                   disabled={item.inUse}
                   onClick={() => deleteSource(item.id, item.name)}
@@ -324,7 +553,7 @@ export default function AdminSourcesPage() {
                   <span>导入结果</span>
                   <span>日志</span>
                 </div>
-                <div className="divide-y divide-line">
+                <div className="max-h-80 divide-y divide-line overflow-auto">
                   {(jobsBySource[item.id] ?? []).map((job) => (
                     <div className="grid grid-cols-[1fr_0.8fr_0.8fr_0.8fr_auto] gap-3 px-3 py-2 text-sm" key={job.id}>
                       <div>
@@ -370,6 +599,72 @@ export default function AdminSourcesPage() {
                   {formatLogLine(event)}
                 </p>
               ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {terminalOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4">
+          <div
+            className={`w-full rounded-lg border border-line bg-white p-4 shadow-xl ${
+              terminalFullscreen ? "h-[98vh] max-w-none" : "h-[90vh] max-w-6xl"
+            }`}
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-base font-medium">Connector 运行终端</h2>
+              <div className="flex gap-2">
+                <button className="button-secondary" onClick={() => setTerminalFullscreen((prev) => !prev)}>
+                  {terminalFullscreen ? "退出全屏" : "全屏"}
+                </button>
+                <button className="button-secondary" onClick={() => setTerminalOpen(false)}>
+                  关闭
+                </button>
+              </div>
+            </div>
+            <p className="mb-2 text-xs text-muted">Job ID: {activeJobId || "-"}</p>
+            <p className="mb-3 text-xs text-muted">状态: {activeJobStatus || "-"}</p>
+
+            <div
+              ref={terminalBodyRef}
+              tabIndex={0}
+              className={`relative mb-3 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100 outline-none ${
+                terminalFullscreen ? "h-[86vh]" : "h-[64vh]"
+              }`}
+              onClick={focusTerminalInput}
+            >
+              <textarea
+                ref={terminalInputRef}
+                value={terminalLine}
+                onChange={(event) => setTerminalLine(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.nativeEvent.isComposing) return;
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    const line = terminalLine;
+                    setTerminalLine("");
+                    void submitJobInput(line);
+                  }
+                }}
+                autoCapitalize="off"
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
+                className="absolute left-0 top-0 h-px w-px opacity-0"
+              />
+              {jobEvents.length === 0 ? <p className="text-slate-300">暂无输出...</p> : null}
+              {renderTerminalEvents()}
+              <p className="w-max whitespace-pre font-mono leading-none text-emerald-300">
+                $ {terminalLine}
+                <span className="animate-pulse">_</span>
+              </p>
+            </div>
+
+            <div className="flex gap-2">
+              <button className="button-secondary" onClick={() => activeJobId && loadJob(activeJobId)}>
+                刷新日志
+              </button>
+              <p className="text-xs text-muted">点击黑色终端区域后可直接输入，按回车发送。</p>
             </div>
           </div>
         </div>

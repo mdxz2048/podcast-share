@@ -24,6 +24,21 @@ function normalizeJobEvent(row: {
   try {
     const parsed = JSON.parse(row.message) as { type?: unknown; level?: unknown; message?: unknown };
     if (typeof parsed.message === "string") {
+      if (parsed.type === "auth_update") {
+        return {
+          ...row,
+          event_type: "auth_update",
+          level: typeof parsed.level === "string" ? parsed.level : row.level,
+          message: parsed.message,
+          payload_json: {
+            ...(row.payload_json ?? {}),
+            ...parsed,
+            value: "[redacted]",
+            secret_value: "[redacted]"
+          }
+        };
+      }
+
       if (parsed.type === "qr_image") {
         return {
           ...row,

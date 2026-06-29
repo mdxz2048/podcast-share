@@ -1,4 +1,5 @@
 import { FastifyInstance } from "fastify";
+import { encryptSecret } from "../utils/secrets.js";
 
 type RunnerEvent = Record<string, unknown>;
 
@@ -8,6 +9,71 @@ type ImportSummary = {
   media: number;
   failed: number;
 };
+
+function redactSensitiveEvent(event: RunnerEvent): RunnerEvent {
+  if (event.type !== "auth_update") {
+    return event;
+  }
+
+  return {
+    ...event,
+    value: "[redacted]",
+    secret_value: "[redacted]"
+  };
+}
+
+export async function applyAuthUpdateEvent(app: FastifyInstance, sourceId: string, event: RunnerEvent): Promise<boolean> {
+  if (event.type !== "auth_update") {
+    return false;
+  }
+
+  const secretKey = typeof event.secret_key === "string" ? event.secret_key : "";
+  const value = typeof event.value === "string" ? event.value : typeof event.secret_value === "string" ? event.secret_value : "";
+  if (!secretKey || !value) {
+    return false;
+  }
+
+  const sourceRes = await app.pg.query(
+    `select cv.manifest_json
+     from connector_sources s
+     join connector_versions cv on cv.id = s.connector_version_id
+     where s.id = $1`,
+    [sourceId]
+  );
+  if ((sourceRes.rowCount ?? 0) === 0) {
+    return false;
+  }
+
+  const manifest = (sourceRes.rows[0].manifest_json ?? {}) as { secrets?: Array<{ key?: unknown }> };
+  const allowedSecrets = new Set((manifest.secrets ?? []).map((item) => item.key).filter((key): key is string => typeof key === "string"));
+  if (!allowedSecrets.has(secretKey)) {
+    return false;
+  }
+
+  const secretRes = await app.pg.query(
+    `insert into secret_records (id, secret_kind, cipher_text, key_version, status, created_at, updated_at)
+     values (gen_random_uuid(), $1, $2, 'v1', 'configured', now(), now())
+     returning id`,
+    [secretKey, encryptSecret(value)]
+  );
+
+  await app.pg.query(
+    `insert into source_secret_bindings (source_id, secret_key, secret_record_id, created_at, updated_at)
+     values ($1, $2, $3, now(), now())
+     on conflict (source_id, secret_key)
+     do update set secret_record_id = excluded.secret_record_id, updated_at = now()`,
+    [sourceId, secretKey, secretRes.rows[0].id]
+  );
+
+  await app.pg.query(
+    `update connector_sources
+     set auth_status = 'configured', auth_unattended_ready = true, updated_at = now()
+     where id = $1`,
+    [sourceId]
+  );
+
+  return true;
+}
 
 async function findProgramIdByExternal(app: FastifyInstance, sourceId: string, externalProgramId: string): Promise<string | null> {
   const result = await app.pg.query(
@@ -151,11 +217,21 @@ export async function applyRunnerEvents(
     const level = typeof event.level === "string" ? event.level : null;
     const message = typeof event.message === "string" ? event.message : null;
 
+    const storedEvent = redactSensitiveEvent(event);
+
     await app.pg.query(
       `insert into import_job_events (id, job_id, event_type, level, message, payload_json, created_at)
        values (gen_random_uuid(), $1, $2, $3, $4, $5::jsonb, now())`,
-      [jobId, eventType, level, message, JSON.stringify(event)]
+      [jobId, eventType, level, message, JSON.stringify(storedEvent)]
     );
+
+    if (eventType === "auth_update") {
+      const ok = await applyAuthUpdateEvent(app, sourceId, event);
+      if (!ok) {
+        summary.failed += 1;
+      }
+      continue;
+    }
 
     if (eventType === "program") {
       const ok = await upsertProgram(app, sourceId, event);

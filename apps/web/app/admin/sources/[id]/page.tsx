@@ -26,10 +26,7 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
   const [scheduleId, setScheduleId] = useState("");
   const [scheduleType, setScheduleType] = useState("hourly");
   const [schedulePaused, setSchedulePaused] = useState(false);
-  const [authMode, setAuthMode] = useState("manual_otp");
-  const [authInputText, setAuthInputText] = useState('{"otp":""}');
-  const [inputConfigText, setInputConfigText] = useState("{}");
-  const [secretConfigText, setSecretConfigText] = useState("{}");
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [message, setMessage] = useState("加载中...");
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [terminalFullscreen, setTerminalFullscreen] = useState(false);
@@ -199,10 +196,10 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
       inUse: Boolean(json.inUse),
       stats: json.stats
     });
-    setInputConfigText(JSON.stringify(json.inputConfig ?? {}, null, 2));
     setScheduleId(json.schedule?.id ?? "");
     setScheduleType(json.schedule?.schedule_type ?? "hourly");
     setSchedulePaused(Boolean(json.schedule?.paused));
+    setScheduleEnabled(Boolean(json.schedule?.enabled));
     setMessage("");
   }
 
@@ -210,25 +207,15 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
     load();
   }, [params.id]);
 
-  async function save() {
-    let inputConfig: Record<string, unknown>;
-    let secretConfig: Record<string, string>;
-    try {
-      inputConfig = JSON.parse(inputConfigText);
-      secretConfig = JSON.parse(secretConfigText);
-    } catch {
-      setMessage("配置 JSON 格式错误");
-      return;
-    }
-
+  async function saveName() {
     const res = await fetch(`${apiBase}/admin/sources/${params.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ name, inputConfig, secretConfig })
+      body: JSON.stringify({ name })
     });
     const json = await res.json();
-    setMessage(json.message ?? (res.ok ? "已保存" : "保存失败"));
+    setMessage(json.message ?? (res.ok ? "Source 名称已保存" : "保存失败"));
     await load();
   }
 
@@ -511,37 +498,6 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
     return nodes;
   }
 
-  async function updateAuthProfile() {
-    const res = await fetch(`${apiBase}/admin/sources/${params.id}/auth`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ mode: authMode, unattendedReady: true })
-    });
-    const json = await res.json();
-    setMessage(json.message ?? (res.ok ? "认证方式已更新" : "更新失败"));
-  }
-
-  async function submitAuthInput() {
-    let input: Record<string, string>;
-    try {
-      input = JSON.parse(authInputText);
-    } catch {
-      setMessage("认证输入 JSON 格式错误");
-      return;
-    }
-
-    const res = await fetch(`${apiBase}/admin/sources/${params.id}/auth/submit-input`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ input })
-    });
-    const json = await res.json();
-    setMessage(json.message ?? (res.ok ? "认证输入已提交" : "提交失败"));
-    await load();
-  }
-
   async function saveSchedule() {
     const res = await fetch(`${apiBase}/admin/sources/${params.id}/schedule`, {
       method: "POST",
@@ -581,16 +537,24 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
       <div className="card space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-base font-medium">{name || "未命名 Source"}</h2>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-base font-medium">{name || "未命名 Source"}</h2>
+              <span className={`rounded px-2 py-0.5 text-xs ${enabled ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-muted"}`}>
+                {enabled ? "已启用" : "已停用"}
+              </span>
+              <span className={`rounded px-2 py-0.5 text-xs ${sourceMeta.inUse ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-muted"}`}>
+                {sourceMeta.inUse && sourceMeta.activeJob ? `运行中：${sourceMeta.activeJob.status}` : "空闲"}
+              </span>
+              <span className={`rounded px-2 py-0.5 text-xs ${scheduleEnabled && !schedulePaused ? "bg-sky-50 text-sky-700" : "bg-slate-100 text-muted"}`}>
+                {scheduleEnabled ? (schedulePaused ? "周期已暂停" : "周期已开启") : "手动触发"}
+              </span>
+            </div>
             <p className="mt-1 text-xs text-muted">
               Connector：{sourceMeta.connector?.displayName ?? "-"} / 版本：{sourceMeta.connector?.version ?? "-"}
             </p>
           </div>
           <p className="text-xs text-muted">
             最近任务：{sourceMeta.lastJobStatus ?? "-"} / 最近成功：{sourceMeta.lastSuccessSyncAt ?? "-"}
-          </p>
-          <p className="text-xs text-muted">
-            当前状态：{enabled ? "已启用" : "已停用"} / {sourceMeta.inUse && sourceMeta.activeJob ? `运行中（${sourceMeta.activeJob.status}）` : "空闲"}
           </p>
         </div>
         <div className="grid gap-2 md:grid-cols-5">
@@ -617,72 +581,60 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
         </div>
       </div>
 
-      <div className="card space-y-3">
-        <label className="text-sm">Source 名称</label>
-        <input className="input" value={name} onChange={(event) => setName(event.target.value)} />
-
-        <label className="text-sm">公开输入参数 JSON</label>
-        <textarea className="input min-h-32" value={inputConfigText} onChange={(event) => setInputConfigText(event.target.value)} />
-
-        <label className="text-sm">敏感参数 JSON（仅填写新增或更新项）</label>
-        <textarea className="input min-h-32" value={secretConfigText} onChange={(event) => setSecretConfigText(event.target.value)} />
-
-        <div className="flex gap-3">
-          <button className="button" onClick={save}>
-            保存配置
-          </button>
-          <button className="button disabled:cursor-not-allowed disabled:opacity-50" disabled={Boolean(sourceMeta.inUse)} onClick={runNow}>
-            立即运行
-          </button>
-          <button className="button-secondary disabled:cursor-not-allowed disabled:opacity-50" disabled={!sourceMeta.inUse} onClick={openActiveJobTerminal}>
-            打开运行终端
-          </button>
-          <button className="button-secondary disabled:cursor-not-allowed disabled:opacity-50" disabled={enabled} onClick={() => toggleEnabled(true)}>
-            启用 Source
-          </button>
-          <button
-            className="button-secondary disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={!enabled || Boolean(sourceMeta.inUse)}
-            onClick={() => toggleEnabled(false)}
-          >
-            停用 Source
-          </button>
-          <button className="button-secondary disabled:cursor-not-allowed disabled:opacity-50" disabled={Boolean(sourceMeta.inUse)} onClick={deleteSource}>
-            删除 Source
-          </button>
+      <div className="grid gap-4 lg:grid-cols-[1fr_1.1fr]">
+        <div className="card space-y-3">
+          <h2 className="text-base font-medium">触发运行</h2>
+          <label className="text-sm">Source 名称</label>
+          <div className="flex gap-2">
+            <input className="input" value={name} onChange={(event) => setName(event.target.value)} />
+            <button className="button-secondary whitespace-nowrap" onClick={saveName}>
+              保存
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-3">
+            <button className="button disabled:cursor-not-allowed disabled:opacity-50" disabled={Boolean(sourceMeta.inUse)} onClick={runNow}>
+              立即运行
+            </button>
+            <button className="button-secondary disabled:cursor-not-allowed disabled:opacity-50" disabled={!sourceMeta.inUse} onClick={openActiveJobTerminal}>
+              打开运行终端
+            </button>
+            <button className="button-secondary disabled:cursor-not-allowed disabled:opacity-50" disabled={enabled} onClick={() => toggleEnabled(true)}>
+              启用
+            </button>
+            <button
+              className="button-secondary disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={!enabled || Boolean(sourceMeta.inUse)}
+              onClick={() => toggleEnabled(false)}
+            >
+              停用
+            </button>
+            <button className="button-secondary disabled:cursor-not-allowed disabled:opacity-50" disabled={Boolean(sourceMeta.inUse)} onClick={deleteSource}>
+              删除
+            </button>
+          </div>
+          <p className="text-xs text-muted">点击立即运行会直接打开终端，可查看脚本输出并输入认证信息。</p>
         </div>
-      </div>
 
-      <div className="card space-y-3">
-        <h2 className="text-base font-medium">认证配置</h2>
-        <input className="input" value={authMode} onChange={(event) => setAuthMode(event.target.value)} placeholder="认证模式" />
-        <textarea className="input min-h-24" value={authInputText} onChange={(event) => setAuthInputText(event.target.value)} />
-        <div className="flex gap-3">
-          <button className="button" onClick={updateAuthProfile}>
-            更新认证模式
-          </button>
-          <button className="button" onClick={submitAuthInput}>
-            提交认证输入
-          </button>
-        </div>
-      </div>
-
-      <div className="card space-y-3">
-        <h2 className="text-base font-medium">周期任务</h2>
-        <select className="input" value={scheduleType} onChange={(event) => setScheduleType(event.target.value)}>
-          <option value="hourly">每小时</option>
-          <option value="every_6_hours">每 6 小时</option>
-          <option value="daily">每天</option>
-          <option value="weekly">每周</option>
-          <option value="cron">自定义 Cron（v1 简化）</option>
-        </select>
-        <div className="flex gap-3">
-          <button className="button" onClick={saveSchedule}>
-            保存周期任务
-          </button>
-          <button className="button" onClick={toggleSchedulePaused}>
-            {schedulePaused ? "恢复周期任务" : "暂停周期任务"}
-          </button>
+        <div className="card space-y-3">
+          <h2 className="text-base font-medium">周期运行</h2>
+          <select className="input" value={scheduleType} onChange={(event) => setScheduleType(event.target.value)}>
+            <option value="hourly">每小时</option>
+            <option value="every_6_hours">每 6 小时</option>
+            <option value="daily">每天</option>
+            <option value="weekly">每周</option>
+            <option value="cron">自定义 Cron（v1 简化）</option>
+          </select>
+          <div className="flex flex-wrap gap-3">
+            <button className="button" onClick={saveSchedule}>
+              保存并开启
+            </button>
+            <button className="button-secondary disabled:cursor-not-allowed disabled:opacity-50" disabled={!scheduleId} onClick={toggleSchedulePaused}>
+              {schedulePaused ? "恢复周期运行" : "暂停周期运行"}
+            </button>
+          </div>
+          <p className="text-xs text-muted">
+            当前：{scheduleEnabled ? scheduleType : "未开启"}{scheduleEnabled && schedulePaused ? " / 已暂停" : ""}
+          </p>
         </div>
       </div>
 
