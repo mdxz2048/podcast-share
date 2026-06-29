@@ -136,7 +136,12 @@ export default function AdminConnectorDetailPage({ params }: { params: { id: str
                 ))}
               </div>
             </div>
-            <button className="button" onClick={() => approve(version.id)}>
+            <button
+              className="button disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={status === "enabled" && version.status === "enabled"}
+              onClick={() => approve(version.id)}
+              title={status === "enabled" && version.status === "enabled" ? "该版本已启用" : "启用该版本"}
+            >
               启用该版本
             </button>
           </article>
@@ -144,7 +149,12 @@ export default function AdminConnectorDetailPage({ params }: { params: { id: str
       </div>
 
       <div className="flex gap-3">
-        <button className="button disabled:cursor-not-allowed disabled:opacity-50" disabled={inUse} onClick={disable} title={inUse ? "仍有 Source 使用，不能停用" : "禁用 Connector"}>
+        <button
+          className="button disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={inUse || status !== "enabled"}
+          onClick={disable}
+          title={inUse ? "仍有 Source 使用，不能停用" : status !== "enabled" ? "Connector 未启用" : "禁用 Connector"}
+        >
           禁用 Connector
         </button>
         <button

@@ -1,0 +1,8 @@
+[Unit]
+Description=Podcast Hub schedule tick
+After=network-online.target podcast-api.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/curl -fsS -X POST http://127.0.0.1:14000/internal/schedules/tick
+

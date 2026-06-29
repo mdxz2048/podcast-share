@@ -34,6 +34,16 @@ function resolveWaitingStatus(events: Array<Record<string, unknown>>, fallback: 
   return fallback;
 }
 
+function isUnattendedAuthReady(context: SourceExecutionContext): boolean {
+  if (context.authStatus === "configured" && context.authUnattendedReady) {
+    return true;
+  }
+
+  const authentication = context.manifestJson.authentication as { modes?: unknown; unattended_supported?: unknown } | undefined;
+  const modes = Array.isArray(authentication?.modes) ? authentication.modes : [];
+  return authentication?.unattended_supported === true && modes.includes("bundled_session");
+}
+
 export async function transitionJobStatus(app: FastifyInstance, jobId: string, to: JobStatus): Promise<void> {
   const currentRes = await app.pg.query("select status from import_jobs where id = $1", [jobId]);
   if ((currentRes.rowCount ?? 0) === 0) {
@@ -211,7 +221,7 @@ export async function executeSourceImport(
     if (!context.sourceEnabled) {
       throw new Error("source is disabled");
     }
-    if (context.authStatus !== "configured" || !context.authUnattendedReady) {
+    if (!isUnattendedAuthReady(context)) {
       throw new Error("auth is not unattended-ready");
     }
 

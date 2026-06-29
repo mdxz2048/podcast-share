@@ -126,14 +126,19 @@ export default function AdminConnectorsPage() {
             </div>
 
             <div className="flex flex-col gap-2">
-              <button className="button-secondary" onClick={() => enableConnector(item.id)}>
+              <button
+                className="button-secondary disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={item.status === "enabled" && item.latestVersionStatus === "enabled"}
+                onClick={() => enableConnector(item.id)}
+                title={item.status === "enabled" && item.latestVersionStatus === "enabled" ? "Connector 已启用" : "启用 Connector"}
+              >
                 启用
               </button>
               <button
                 className="button-secondary disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={item.inUse}
+                disabled={item.inUse || item.status !== "enabled"}
                 onClick={() => disableConnector(item.id)}
-                title={item.inUse ? "仍有 Source 使用，不能停用" : "停用 Connector"}
+                title={item.inUse ? "仍有 Source 使用，不能停用" : item.status !== "enabled" ? "Connector 未启用" : "停用 Connector"}
               >
                 停用
               </button>

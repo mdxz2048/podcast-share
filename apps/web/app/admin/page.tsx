@@ -102,13 +102,13 @@ export default function AdminHomePage() {
             <section className="card space-y-3">
               <div className="flex items-center justify-between">
                 <h2 className="text-base font-medium">最近运行记录</h2>
-                <Link className="text-sm text-accent" href="/admin/jobs">
-                  查看全部
+                <Link className="text-sm text-accent" href="/admin/sources">
+                  去 Source 管理
                 </Link>
               </div>
               <div className="space-y-2">
                 {data.recentJobs.map((job) => (
-                  <Link className="block rounded border border-line p-3 text-sm hover:border-accent" href={`/admin/jobs/${job.id}`} key={job.id}>
+                  <Link className="block rounded border border-line p-3 text-sm hover:border-accent" href={`/admin/sources/${job.source.id}`} key={job.id}>
                     <div className="flex items-center justify-between gap-4">
                       <span className="font-medium">{job.source.name}</span>
                       <span className="text-xs text-muted">{job.status}</span>

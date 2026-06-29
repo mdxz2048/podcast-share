@@ -19,6 +19,8 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
     connector?: { displayName: string; version: string };
     lastJobStatus?: string | null;
     lastSuccessSyncAt?: string | null;
+    activeJob?: { id: string; status: string } | null;
+    inUse?: boolean;
     stats?: { programs: number; episodes: number; media: number; mediaBytes: number; jobs: number };
   }>({});
   const [scheduleId, setScheduleId] = useState("");
@@ -93,7 +95,7 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
   }
 
   async function openActiveJobTerminal() {
-    const res = await fetch(`${apiBase}/admin/jobs`, { credentials: "include" });
+    const res = await fetch(`${apiBase}/admin/jobs?sourceId=${params.id}`, { credentials: "include" });
     const json = await res.json();
     if (!res.ok) {
       setMessage(json.message ?? "任务列表加载失败");
@@ -193,6 +195,8 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
       connector: json.connector,
       lastJobStatus: json.lastJobStatus,
       lastSuccessSyncAt: json.lastSuccessSyncAt,
+      activeJob: json.activeJob ?? null,
+      inUse: Boolean(json.inUse),
       stats: json.stats
     });
     setInputConfigText(JSON.stringify(json.inputConfig ?? {}, null, 2));
@@ -585,6 +589,9 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
           <p className="text-xs text-muted">
             最近任务：{sourceMeta.lastJobStatus ?? "-"} / 最近成功：{sourceMeta.lastSuccessSyncAt ?? "-"}
           </p>
+          <p className="text-xs text-muted">
+            当前状态：{enabled ? "已启用" : "已停用"} / {sourceMeta.inUse && sourceMeta.activeJob ? `运行中（${sourceMeta.activeJob.status}）` : "空闲"}
+          </p>
         </div>
         <div className="grid gap-2 md:grid-cols-5">
           <div className="rounded border border-line p-3">
@@ -624,16 +631,23 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
           <button className="button" onClick={save}>
             保存配置
           </button>
-          <button className="button" onClick={runNow}>
+          <button className="button disabled:cursor-not-allowed disabled:opacity-50" disabled={Boolean(sourceMeta.inUse)} onClick={runNow}>
             立即运行
           </button>
-          <button className="button-secondary" onClick={openActiveJobTerminal}>
+          <button className="button-secondary disabled:cursor-not-allowed disabled:opacity-50" disabled={!sourceMeta.inUse} onClick={openActiveJobTerminal}>
             打开运行终端
           </button>
-          <button className="button" onClick={() => toggleEnabled(!enabled)}>
-            {enabled ? "禁用 Source" : "启用 Source"}
+          <button className="button-secondary disabled:cursor-not-allowed disabled:opacity-50" disabled={enabled} onClick={() => toggleEnabled(true)}>
+            启用 Source
           </button>
-          <button className="button-secondary" onClick={deleteSource}>
+          <button
+            className="button-secondary disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={!enabled || Boolean(sourceMeta.inUse)}
+            onClick={() => toggleEnabled(false)}
+          >
+            停用 Source
+          </button>
+          <button className="button-secondary disabled:cursor-not-allowed disabled:opacity-50" disabled={Boolean(sourceMeta.inUse)} onClick={deleteSource}>
             删除 Source
           </button>
         </div>

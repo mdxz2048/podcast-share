@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Podcast Hub schedule tick every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=podcast-schedule-tick.service
+
+[Install]
+WantedBy=timers.target
+

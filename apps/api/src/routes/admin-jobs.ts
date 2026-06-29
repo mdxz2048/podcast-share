@@ -60,6 +60,8 @@ export async function adminJobRoutes(app: FastifyInstance): Promise<void> {
       return;
     }
 
+    const query = z.object({ sourceId: z.string().uuid().optional() }).parse(request.query ?? {});
+
     const rows = await app.pg.query(
       `select j.id, j.status, j.trigger_type, j.started_at, j.ended_at,
               j.discovered_programs, j.discovered_episodes, j.imported_media,
@@ -70,8 +72,10 @@ export async function adminJobRoutes(app: FastifyInstance): Promise<void> {
        join connector_sources s on s.id = j.source_id
        join connectors c on c.id = j.connector_id
        join connector_versions cv on cv.id = j.connector_version_id
+       where ($1::uuid is null or j.source_id = $1)
        order by j.created_at desc
-       limit 200`
+       limit 200`,
+      [query.sourceId ?? null]
     );
 
     return {

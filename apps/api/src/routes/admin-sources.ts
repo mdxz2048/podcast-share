@@ -17,7 +17,7 @@ function assertAdmin(request: { user: { id: string; isAdmin: boolean } | null },
 type ManifestLike = {
   run_modes?: { scheduled?: boolean };
   schedule?: { minimum_interval_minutes?: number };
-  authentication?: { unattended_supported?: boolean };
+  authentication?: { modes?: string[]; unattended_supported?: boolean };
   inputs?: Array<{ key: string }>;
   secrets?: Array<{ key: string }>;
 };
@@ -44,6 +44,11 @@ function splitConfigByManifest(manifest: ManifestLike, inputConfig: Record<strin
     inputs: normalizedInputs,
     secrets: normalizedSecrets
   };
+}
+
+function hasBundledUnattendedAuth(manifest: ManifestLike) {
+  const modes = Array.isArray(manifest.authentication?.modes) ? manifest.authentication.modes : [];
+  return manifest.authentication?.unattended_supported === true && modes.includes("bundled_session");
 }
 
 function computeNextRunAt(scheduleType: string, cronExpression: string | null): Date {
@@ -269,7 +274,7 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
       );
     }
 
-    const authConfigured = Object.keys(normalized.secrets).length > 0;
+    const authConfigured = Object.keys(normalized.secrets).length > 0 || hasBundledUnattendedAuth(manifest);
     await app.pg.query(
       `update connector_sources
        set auth_status = $1, auth_unattended_ready = $2, updated_at = now()
@@ -299,6 +304,7 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
               cv.id as connector_version_id, cv.version as connector_version,
               cv.manifest_json,
               csc.config_json,
+              active_job.id as active_job_id, active_job.status as active_job_status,
               coalesce(content_stats.program_count, 0)::int as program_count,
               coalesce(content_stats.episode_count, 0)::int as episode_count,
               coalesce(content_stats.media_count, 0)::int as media_count,
@@ -308,6 +314,14 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
        join connectors c on c.id = s.connector_id
        join connector_versions cv on cv.id = s.connector_version_id
        left join connector_source_configs csc on csc.source_id = s.id
+       left join lateral (
+         select j.id, j.status
+         from import_jobs j
+         where j.source_id = s.id
+           and j.status in ('queued', 'running', 'waiting_for_input', 'waiting_for_auth')
+         order by j.created_at desc
+         limit 1
+       ) active_job on true
        left join lateral (
          select count(distinct p.id) as program_count,
                 count(distinct e.id) as episode_count,
@@ -360,6 +374,13 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
       runPolicy: source.run_policy,
       lastSuccessSyncAt: source.last_success_sync_at,
       lastJobStatus: source.last_job_status,
+      activeJob: source.active_job_id
+        ? {
+            id: source.active_job_id,
+            status: source.active_job_status
+          }
+        : null,
+      inUse: Boolean(source.active_job_id),
       updatedAt: source.updated_at,
       connector: {
         id: source.connector_id,
@@ -472,6 +493,15 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const { sourceId } = z.object({ sourceId: z.string().uuid() }).parse(request.params);
+
+    const sourceRes = await app.pg.query("select id, enabled from connector_sources where id = $1", [sourceId]);
+    if ((sourceRes.rowCount ?? 0) === 0) {
+      return reply.status(404).send({ message: "Source 不存在" });
+    }
+    if (sourceRes.rows[0].enabled) {
+      return { message: "Source 已经是启用状态" };
+    }
+
     await app.pg.query("update connector_sources set enabled = true, updated_at = now() where id = $1", [sourceId]);
     return { message: "Source 已启用" };
   });
@@ -727,6 +757,29 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const { sourceId } = z.object({ sourceId: z.string().uuid() }).parse(request.params);
+
+    const sourceRes = await app.pg.query("select id, enabled from connector_sources where id = $1", [sourceId]);
+    if ((sourceRes.rowCount ?? 0) === 0) {
+      return reply.status(404).send({ message: "Source 不存在" });
+    }
+    if (!sourceRes.rows[0].enabled) {
+      return { message: "Source 已经是禁用状态" };
+    }
+
+    const activeJobRes = await app.pg.query(
+      `select id, status
+       from import_jobs
+       where source_id = $1
+         and status in ('queued', 'running', 'waiting_for_input', 'waiting_for_auth')
+       order by created_at desc
+       limit 1`,
+      [sourceId]
+    );
+    if ((activeJobRes.rowCount ?? 0) > 0) {
+      const activeJob = activeJobRes.rows[0];
+      return reply.status(409).send({ message: `Source 正在运行任务 ${activeJob.id}（${activeJob.status}），不能禁用` });
+    }
+
     await app.pg.query("update connector_sources set enabled = false, updated_at = now() where id = $1", [sourceId]);
     return { message: "Source 已禁用" };
   });

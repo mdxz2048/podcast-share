@@ -17,7 +17,6 @@ const adminLinks: Array<{ href: Route; label: string }> = [
   { href: "/admin/programs", label: "节目管理" },
   { href: "/admin/connectors", label: "Connector 管理" },
   { href: "/admin/sources", label: "Source 管理" },
-  { href: "/admin/jobs", label: "任务" },
   { href: "/admin/users", label: "用户管理" },
   { href: "/admin/audience-groups", label: "用户类别" },
   { href: "/admin/rss", label: "RSS 管理" }
@@ -121,6 +120,16 @@ export function Nav() {
     return null;
   }
 
+  function isActive(href: string) {
+    if (href === "/") {
+      return pathname === "/";
+    }
+    if (href === "/admin") {
+      return pathname === "/admin";
+    }
+    return pathname === href || pathname.startsWith(`${href}/`);
+  }
+
   return (
     <header className="border-b border-line bg-white">
       <div className="mx-auto flex max-w-7xl items-center justify-between gap-6 px-6 py-4">
@@ -130,7 +139,15 @@ export function Nav() {
         <div className="flex min-w-0 items-center gap-6">
           <nav className="flex flex-wrap gap-x-5 gap-y-2 text-sm text-muted">
             {navLinks.map((item) => (
-              <Link key={item.href} href={item.href} className="hover:text-ink">
+              <Link
+                key={item.href}
+                href={item.href}
+                className={`rounded px-2 py-1 transition ${
+                  isActive(item.href)
+                    ? "bg-slate-950 text-white shadow-sm"
+                    : "hover:bg-slate-100 hover:text-ink"
+                }`}
+              >
                 {item.label}
               </Link>
             ))}
