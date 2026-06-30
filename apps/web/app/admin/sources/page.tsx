@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 
@@ -18,6 +17,8 @@ type Source = {
   name: string;
   enabled: boolean;
   authStatus: string;
+  runPolicy: string;
+  lastSuccessSyncAt: string | null;
   jobCount: number;
   inUse: boolean;
   activeJob: {
@@ -35,6 +36,17 @@ type Source = {
     version: string;
     versionId: string;
   };
+  schedule: {
+    id: string;
+    enabled: boolean;
+    paused: boolean;
+    scheduleType: string;
+    intervalHours: number | null;
+    nextRunAt: string | null;
+    lastRunAt: string | null;
+    lastSuccessAt: string | null;
+    lastErrorAt: string | null;
+  } | null;
 };
 
 type Job = {
@@ -81,6 +93,9 @@ export default function AdminSourcesPage() {
   const [activeJobStatus, setActiveJobStatus] = useState("");
   const [terminalLine, setTerminalLine] = useState("");
   const [jobEvents, setJobEvents] = useState<JobEvent[]>([]);
+  const [settingsSource, setSettingsSource] = useState<Source | null>(null);
+  const [runMode, setRunMode] = useState<"manual" | "scheduled">("manual");
+  const [intervalHours, setIntervalHours] = useState(6);
   const terminalBodyRef = useRef<HTMLDivElement | null>(null);
   const terminalInputRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -228,7 +243,7 @@ export default function AdminSourcesPage() {
       return;
     }
 
-    setMessage("正在启动任务并连接运行终端...");
+    setMessage("正在创建同步任务并连接运行终端...");
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
 
@@ -251,7 +266,7 @@ export default function AdminSourcesPage() {
         setMessage(json.message ?? "运行失败");
         return;
       }
-      setMessage(`任务已启动，Job ID: ${json.jobId}`);
+      setMessage(`同步任务已创建，Job ID: ${json.jobId}`);
       if (json.jobId) {
         await openJobTerminal(json.jobId, json.status ?? "");
       }
@@ -263,11 +278,11 @@ export default function AdminSourcesPage() {
       if (error instanceof DOMException && error.name === "AbortError") {
         const opened = await openActiveJobTerminalForSource(source.id);
         if (opened) {
-          setMessage("任务已启动，正在显示实时输出...");
+          setMessage("同步任务已创建，正在显示实时输出...");
           return;
         }
         await load();
-        setMessage("任务可能已启动，但暂未检索到运行中的 Job，请稍后重试。");
+        setMessage("同步任务可能已创建，但暂未检索到运行中的 Job，请稍后重试。");
         return;
       }
       setMessage(error instanceof Error ? error.message : "运行失败");
@@ -320,6 +335,85 @@ export default function AdminSourcesPage() {
       return "-";
     }
     return new Date(value).toLocaleString();
+  }
+
+  function formatShortTime(value: string | null) {
+    if (!value) {
+      return "-";
+    }
+    return new Date(value).toLocaleString(undefined, {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+  }
+
+  function scheduleIntervalHours(source: Source) {
+    if (!source.schedule) return 6;
+    if (source.schedule.scheduleType === "interval_hours" && source.schedule.intervalHours) {
+      return source.schedule.intervalHours;
+    }
+    if (source.schedule.scheduleType === "hourly") return 1;
+    if (source.schedule.scheduleType === "every_6_hours") return 6;
+    if (source.schedule.scheduleType === "daily") return 24;
+    if (source.schedule.scheduleType === "weekly") return 168;
+    return 6;
+  }
+
+  function runModeLabel(source: Source) {
+    if (source.runPolicy !== "scheduled_allowed" || !source.schedule?.enabled) {
+      return "手动";
+    }
+    const label = `每 ${scheduleIntervalHours(source)} 小时`;
+    return source.schedule.paused ? `${label}（已暂停）` : label;
+  }
+
+  function sourceDots(source: Source) {
+    return [
+      {
+        label: source.enabled ? "已启用" : "已停用",
+        className: source.enabled ? "bg-emerald-500" : "bg-slate-300"
+      },
+      {
+        label: source.inUse && source.activeJob ? `运行中：${source.activeJob.status}` : "空闲",
+        className: source.inUse ? "bg-amber-500" : "bg-sky-500"
+      },
+      {
+        label: runModeLabel(source),
+        className: source.runPolicy === "scheduled_allowed" && source.schedule?.enabled && !source.schedule.paused ? "bg-violet-500" : "bg-slate-300"
+      }
+    ];
+  }
+
+  function openRunSettings(source: Source) {
+    setSettingsSource(source);
+    setRunMode(source.runPolicy === "scheduled_allowed" && source.schedule?.enabled ? "scheduled" : "manual");
+    setIntervalHours(scheduleIntervalHours(source));
+  }
+
+  function estimatedNextRun() {
+    return formatShortTime(new Date(Date.now() + intervalHours * 60 * 60 * 1000).toISOString());
+  }
+
+  async function saveRunSettings() {
+    if (!settingsSource) return;
+    const res = await fetch(`${apiBase}/admin/sources/${settingsSource.id}/schedule`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(
+        runMode === "manual"
+          ? { scheduleType: "manual", enabled: false }
+          : { scheduleType: "interval_hours", intervalHours, enabled: true }
+      )
+    });
+    const json = await res.json();
+    setMessage(json.message ?? (res.ok ? "运行设置已保存" : "保存失败"));
+    if (res.ok) {
+      setSettingsSource(null);
+      await load();
+    }
   }
 
   function formatLogLine(event: JobEvent) {
@@ -470,20 +564,26 @@ export default function AdminSourcesPage() {
         {items.map((item) => (
           <article className="card space-y-4" key={item.id}>
             <div className="grid gap-4 lg:grid-cols-[1.2fr_1fr_auto]">
-              <div className="space-y-1">
-                <div className="flex flex-wrap items-center gap-2">
+              <div className="space-y-3">
+                <div>
                   <h2 className="text-base font-medium">{item.name}</h2>
-                  <span className={`rounded px-2 py-0.5 text-xs ${item.enabled ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-muted"}`}>
-                    {item.enabled ? "已启用" : "已停用"}
-                  </span>
-                  <span className={`rounded px-2 py-0.5 text-xs ${item.inUse ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-muted"}`}>
-                    {item.inUse && item.activeJob ? `运行中：${item.activeJob.status}` : "空闲"}
-                  </span>
+                  <p className="mt-1 text-xs text-muted">
+                    {item.connector.displayName} / {item.connector.version}
+                  </p>
                 </div>
-                <p className="text-xs text-muted">Connector：{item.connector.displayName}</p>
-                <p className="text-xs text-muted">版本：{item.connector.version}</p>
-                <p className="text-xs text-muted">认证状态：{item.authStatus}</p>
-                <p className="text-xs text-muted">历史任务数：{item.jobCount}</p>
+                <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs">
+                  {sourceDots(item).map((dot) => (
+                    <span className="inline-flex items-center gap-1.5" key={dot.label}>
+                      <span className={`h-2 w-2 rounded-full ${dot.className}`} />
+                      {dot.label}
+                    </span>
+                  ))}
+                </div>
+                <div className="space-y-1 text-xs text-muted">
+                  <p>下次运行：{item.runPolicy === "scheduled_allowed" && item.schedule?.enabled && !item.schedule.paused ? formatShortTime(item.schedule.nextRunAt) : "-"}</p>
+                  <p>上次成功：{formatShortTime(item.lastSuccessSyncAt ?? item.schedule?.lastSuccessAt ?? null)}</p>
+                  <p>认证：{item.authStatus} / 历史任务：{item.jobCount}</p>
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-2 text-sm">
                 <div className="rounded border border-line p-3">
@@ -525,7 +625,10 @@ export default function AdminSourcesPage() {
                   onClick={() => runSourceNow(item)}
                   title={!item.enabled ? "Source 已停用，请先启用" : item.activeJob ? "查看当前运行终端" : "立即运行并打开终端"}
                 >
-                  {item.activeJob ? "查看终端" : "启动"}
+                  {item.activeJob ? "查看终端" : "立即同步"}
+                </button>
+                <button className="button-secondary" onClick={() => openRunSettings(item)}>
+                  运行设置
                 </button>
                 <button
                   className="button-secondary disabled:cursor-not-allowed disabled:opacity-50"
@@ -535,9 +638,6 @@ export default function AdminSourcesPage() {
                 >
                   删除
                 </button>
-                <Link className="text-sm text-accent" href={`/admin/sources/${item.id}`}>
-                  配置
-                </Link>
                 <button className="text-left text-sm text-accent" onClick={() => toggleSourceJobs(item.id)}>
                   {expandedSourceId === item.id ? "收起运行记录" : "查看运行记录"}
                 </button>
@@ -599,6 +699,78 @@ export default function AdminSourcesPage() {
                   {formatLogLine(event)}
                 </p>
               ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {settingsSource ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4">
+          <div className="w-full max-w-lg rounded-lg border border-line bg-white p-4 shadow-xl">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-base font-medium">运行设置</h2>
+                <p className="mt-1 text-xs text-muted">{settingsSource.name}</p>
+              </div>
+              <button className="button-secondary" onClick={() => setSettingsSource(null)}>
+                关闭
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <label className="flex cursor-pointer items-start gap-3 rounded border border-line p-3">
+                <input
+                  checked={runMode === "manual"}
+                  className="mt-1"
+                  name="run-mode"
+                  onChange={() => setRunMode("manual")}
+                  type="radio"
+                />
+                <span>
+                  <span className="block text-sm font-medium">手动触发</span>
+                  <span className="mt-1 block text-xs text-muted">只在点击“立即同步”时运行。</span>
+                </span>
+              </label>
+
+              <label className="flex cursor-pointer items-start gap-3 rounded border border-line p-3">
+                <input
+                  checked={runMode === "scheduled"}
+                  className="mt-1"
+                  name="run-mode"
+                  onChange={() => setRunMode("scheduled")}
+                  type="radio"
+                />
+                <span className="flex-1">
+                  <span className="block text-sm font-medium">定时同步</span>
+                  <span className="mt-1 block text-xs text-muted">按固定小时间隔自动运行。</span>
+                  {runMode === "scheduled" ? (
+                    <span className="mt-3 grid gap-2">
+                      <span className="text-xs text-muted">同步间隔</span>
+                      <span className="flex items-center gap-2">
+                        <input
+                          className="input w-28"
+                          max={168}
+                          min={1}
+                          onChange={(event) => setIntervalHours(Math.min(168, Math.max(1, Number(event.target.value) || 1)))}
+                          type="number"
+                          value={intervalHours}
+                        />
+                        <span className="text-sm">小时</span>
+                      </span>
+                      <span className="text-xs text-muted">下次运行预计：{estimatedNextRun()}</span>
+                    </span>
+                  ) : null}
+                </span>
+              </label>
+            </div>
+
+            <div className="mt-4 flex justify-end gap-2">
+              <button className="button-secondary" onClick={() => setSettingsSource(null)}>
+                取消
+              </button>
+              <button className="button" onClick={saveRunSettings}>
+                保存
+              </button>
             </div>
           </div>
         </div>

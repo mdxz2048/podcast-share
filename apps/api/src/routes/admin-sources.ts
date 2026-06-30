@@ -51,8 +51,19 @@ function hasBundledUnattendedAuth(manifest: ManifestLike) {
   return manifest.authentication?.unattended_supported === true && modes.includes("bundled_session");
 }
 
+function parseIntervalHours(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return 6;
+  }
+  return Math.min(168, Math.max(1, Math.trunc(parsed)));
+}
+
 function computeNextRunAt(scheduleType: string, cronExpression: string | null): Date {
   const now = new Date();
+  if (scheduleType === "interval_hours") {
+    return new Date(now.getTime() + parseIntervalHours(cronExpression) * 60 * 60 * 1000);
+  }
   if (scheduleType === "hourly") {
     return new Date(now.getTime() + 60 * 60 * 1000);
   }
@@ -132,6 +143,9 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
               s.last_success_sync_at, s.last_job_status, s.created_at, s.updated_at,
               c.id as connector_id, c.name as connector_name, c.display_name as connector_display_name,
               cv.id as connector_version_id, cv.version as connector_version,
+              sched.id as schedule_id, sched.enabled as schedule_enabled, sched.paused as schedule_paused,
+              sched.schedule_type, sched.cron_expression, sched.next_run_at,
+              sched.last_run_at, sched.last_success_at, sched.last_error_at,
               active_job.id as active_job_id, active_job.status as active_job_status,
               coalesce(job_usage.job_count, 0)::int as job_count,
               coalesce(content_stats.program_count, 0)::int as program_count,
@@ -141,6 +155,14 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
        from connector_sources s
        join connectors c on c.id = s.connector_id
        join connector_versions cv on cv.id = s.connector_version_id
+       left join lateral (
+         select id, enabled, paused, schedule_type, cron_expression,
+                next_run_at, last_run_at, last_success_at, last_error_at
+         from schedules
+         where source_id = s.id
+         order by created_at desc
+         limit 1
+       ) sched on true
        left join lateral (
          select j.id, j.status
          from import_jobs j
@@ -199,7 +221,20 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
           displayName: row.connector_display_name,
           versionId: row.connector_version_id,
           version: row.connector_version
-        }
+        },
+        schedule: row.schedule_id
+          ? {
+              id: row.schedule_id,
+              enabled: row.schedule_enabled,
+              paused: row.schedule_paused,
+              scheduleType: row.schedule_type,
+              intervalHours: row.schedule_type === "interval_hours" ? parseIntervalHours(row.cron_expression) : null,
+              nextRunAt: row.next_run_at,
+              lastRunAt: row.last_run_at,
+              lastSuccessAt: row.last_success_at,
+              lastErrorAt: row.last_error_at
+            }
+          : null
       }))
     };
   });
@@ -626,7 +661,8 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
     const { sourceId } = z.object({ sourceId: z.string().uuid() }).parse(request.params);
     const body = z
       .object({
-        scheduleType: z.enum(["hourly", "every_6_hours", "daily", "weekly", "cron"]),
+        scheduleType: z.enum(["manual", "interval_hours", "hourly", "every_6_hours", "daily", "weekly", "cron"]),
+        intervalHours: z.number().int().min(1).max(168).optional(),
         cronExpression: z.string().optional(),
         enabled: z.boolean().default(true)
       })
@@ -649,9 +685,30 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ message: "该 Connector 不支持周期任务" });
     }
 
+    if (body.scheduleType === "manual") {
+      await app.pg.query("update connector_sources set run_policy = 'manual_only', updated_at = now() where id = $1", [sourceId]);
+      await app.pg.query(
+        `update schedules
+         set enabled = false, paused = true, next_run_at = null, updated_at = now()
+         where source_id = $1`,
+        [sourceId]
+      );
+      return {
+        message: "已切换为手动触发",
+        schedule: null
+      };
+    }
+
     const minimumInterval = manifest.schedule?.minimum_interval_minutes ?? 60;
-    const cronExpression = body.scheduleType === "cron" ? body.cronExpression ?? "0 * * * *" : null;
+    const cronExpression =
+      body.scheduleType === "interval_hours"
+        ? String(parseIntervalHours(body.intervalHours ?? body.cronExpression))
+        : body.scheduleType === "cron"
+          ? body.cronExpression ?? "0 * * * *"
+          : null;
     const nextRunAt = computeNextRunAt(body.scheduleType, cronExpression);
+
+    await app.pg.query("update connector_sources set run_policy = 'scheduled_allowed', updated_at = now() where id = $1", [sourceId]);
 
     const scheduleRes = await app.pg.query(
       `insert into schedules (
@@ -689,7 +746,8 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
     const body = z
       .object({
         enabled: z.boolean().optional(),
-        scheduleType: z.enum(["hourly", "every_6_hours", "daily", "weekly", "cron"]).optional(),
+        scheduleType: z.enum(["interval_hours", "hourly", "every_6_hours", "daily", "weekly", "cron"]).optional(),
+        intervalHours: z.number().int().min(1).max(168).optional(),
         cronExpression: z.string().optional()
       })
       .parse(request.body);
@@ -700,7 +758,12 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const scheduleType = body.scheduleType ?? currentRes.rows[0].schedule_type;
-    const cronExpression = scheduleType === "cron" ? body.cronExpression ?? currentRes.rows[0].cron_expression ?? "0 * * * *" : null;
+    const cronExpression =
+      scheduleType === "interval_hours"
+        ? String(parseIntervalHours(body.intervalHours ?? body.cronExpression ?? currentRes.rows[0].cron_expression))
+        : scheduleType === "cron"
+          ? body.cronExpression ?? currentRes.rows[0].cron_expression ?? "0 * * * *"
+          : null;
 
     await app.pg.query(
       `update schedules

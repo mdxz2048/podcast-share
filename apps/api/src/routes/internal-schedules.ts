@@ -1,8 +1,19 @@
 import { FastifyInstance } from "fastify";
 import { executeSourceImport } from "../services/job-execution.js";
 
+function parseIntervalHours(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return 6;
+  }
+  return Math.min(168, Math.max(1, Math.trunc(parsed)));
+}
+
 function nextRunAt(scheduleType: string, cronExpression: string | null): Date {
   const now = new Date();
+  if (scheduleType === "interval_hours") {
+    return new Date(now.getTime() + parseIntervalHours(cronExpression) * 60 * 60 * 1000);
+  }
   if (scheduleType === "hourly") {
     return new Date(now.getTime() + 60 * 60 * 1000);
   }
