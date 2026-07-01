@@ -6,7 +6,6 @@ import { useEffect, useMemo, useState } from "react";
 import type { Route } from "next";
 
 const userLinks: Array<{ href: Route; label: string }> = [
-  { href: "/", label: "首页" },
   { href: "/programs", label: "节目目录" },
   { href: "/my/rss", label: "我的 RSS" },
   { href: "/account", label: "账户" }
@@ -18,7 +17,6 @@ const adminLinks: Array<{ href: Route; label: string }> = [
   { href: "/admin/connectors", label: "Connector 管理" },
   { href: "/admin/sources", label: "Source 管理" },
   { href: "/admin/users", label: "用户管理" },
-  { href: "/admin/audience-groups", label: "用户类别" },
   { href: "/admin/rss", label: "RSS 管理" }
 ];
 

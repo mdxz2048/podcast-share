@@ -29,3 +29,18 @@ main {
 .input {
   @apply w-full rounded-lg border border-line px-3 py-2 text-sm outline-none focus:border-accent;
 }
+
+.line-clamp-2,
+.line-clamp-3 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.line-clamp-2 {
+  -webkit-line-clamp: 2;
+}
+
+.line-clamp-3 {
+  -webkit-line-clamp: 3;
+}

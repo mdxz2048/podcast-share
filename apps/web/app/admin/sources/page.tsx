@@ -94,6 +94,7 @@ export default function AdminSourcesPage() {
   const [terminalLine, setTerminalLine] = useState("");
   const [jobEvents, setJobEvents] = useState<JobEvent[]>([]);
   const [settingsSource, setSettingsSource] = useState<Source | null>(null);
+  const [deleteSourceTarget, setDeleteSourceTarget] = useState<Source | null>(null);
   const [runMode, setRunMode] = useState<"manual" | "scheduled">("manual");
   const [intervalHours, setIntervalHours] = useState(6);
   const terminalBodyRef = useRef<HTMLDivElement | null>(null);
@@ -488,18 +489,21 @@ export default function AdminSourcesPage() {
     return nodes;
   }
 
-  async function deleteSource(sourceId: string, sourceName: string) {
-    if (!confirm(`确认删除 Source「${sourceName}」吗？`)) {
+  async function deleteSource() {
+    if (!deleteSourceTarget) {
       return;
     }
 
-    const res = await fetch(`${apiBase}/admin/sources/${sourceId}`, {
+    const res = await fetch(`${apiBase}/admin/sources/${deleteSourceTarget.id}`, {
       method: "DELETE",
       credentials: "include"
     });
     const json = await res.json();
     setMessage(json.message ?? (res.ok ? "Source 已删除" : "删除失败"));
-    await load();
+    if (res.ok) {
+      setDeleteSourceTarget(null);
+      await load();
+    }
   }
 
   async function createSource() {
@@ -633,7 +637,7 @@ export default function AdminSourcesPage() {
                 <button
                   className="button-secondary disabled:cursor-not-allowed disabled:opacity-50"
                   disabled={item.inUse}
-                  onClick={() => deleteSource(item.id, item.name)}
+                  onClick={() => setDeleteSourceTarget(item)}
                   title={item.inUse ? "Source 有活动任务，不能删除" : "删除 Source"}
                 >
                   删除
@@ -770,6 +774,30 @@ export default function AdminSourcesPage() {
               </button>
               <button className="button" onClick={saveRunSettings}>
                 保存
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteSourceTarget ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4">
+          <div className="w-full max-w-md rounded-lg border border-line bg-white p-5 shadow-xl">
+            <h2 className="text-base font-medium">确认删除 Source</h2>
+            <p className="mt-2 text-sm text-muted">
+              将删除「{deleteSourceTarget.name}」以及它导入出的节目、单集、音频文件和运行记录。这个操作不能撤销。
+            </p>
+            <div className="mt-4 rounded border border-line bg-slate-50 p-3 text-xs text-muted">
+              <p>节目：{deleteSourceTarget.stats?.programs ?? 0}</p>
+              <p>单集：{deleteSourceTarget.stats?.episodes ?? 0}</p>
+              <p>音频：{deleteSourceTarget.stats?.media ?? 0}</p>
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button className="button-secondary" onClick={() => setDeleteSourceTarget(null)}>
+                取消
+              </button>
+              <button className="button" onClick={deleteSource}>
+                确认删除
               </button>
             </div>
           </div>

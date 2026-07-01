@@ -12,3 +12,5 @@ coverage
 storage
 .downloads/
 .venv-runner-real/
+.tmp/
+upload-ready/*/runtime_data/

@@ -31,6 +31,8 @@ export default function MyRssPage() {
   const [programs, setPrograms] = useState<Program[]>([]);
   const [selectedProgramIds, setSelectedProgramIds] = useState<string[]>([]);
   const [name, setName] = useState("通勤 RSS");
+  const [rotateTarget, setRotateTarget] = useState<Feed | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Feed | null>(null);
   const [message, setMessage] = useState("加载中...");
 
   async function load() {
@@ -52,7 +54,7 @@ export default function MyRssPage() {
   }
 
   useEffect(() => {
-    load();
+    void load();
   }, []);
 
   async function createFeed() {
@@ -81,11 +83,9 @@ export default function MyRssPage() {
     setMessage(`已复制：${feed.name}`);
   }
 
-  async function rotateFeed(feed: Feed) {
-    if (!confirm(`确认更新「${feed.name}」的 RSS 链接吗？旧链接会立即失效。`)) {
-      return;
-    }
-    const res = await fetch(`${apiBase}/me/rss-feeds/${feed.id}/rotate`, {
+  async function rotateFeed() {
+    if (!rotateTarget) return;
+    const res = await fetch(`${apiBase}/me/rss-feeds/${rotateTarget.id}/rotate`, {
       method: "POST",
       credentials: "include"
     });
@@ -95,20 +95,22 @@ export default function MyRssPage() {
       return;
     }
     setMessage(`新链接已生成：${json.rssUrl}`);
+    setRotateTarget(null);
     await load();
   }
 
-  async function deleteFeed(feed: Feed) {
-    if (!confirm(`确认删除 RSS「${feed.name}」吗？删除后该链接不可访问。`)) {
-      return;
-    }
-    const res = await fetch(`${apiBase}/me/rss-feeds/${feed.id}`, {
+  async function deleteFeed() {
+    if (!deleteTarget) return;
+    const res = await fetch(`${apiBase}/me/rss-feeds/${deleteTarget.id}`, {
       method: "DELETE",
       credentials: "include"
     });
     const json = await res.json();
     setMessage(json.message ?? (res.ok ? "RSS 已删除" : "删除失败"));
-    await load();
+    if (res.ok) {
+      setDeleteTarget(null);
+      await load();
+    }
   }
 
   function toggleProgram(programId: string) {
@@ -116,58 +118,108 @@ export default function MyRssPage() {
   }
 
   return (
-    <section className="space-y-4">
-      <h1 className="text-2xl font-semibold">我的 RSS</h1>
+    <section className="space-y-5">
+      <div>
+        <h1 className="text-2xl font-semibold">我的 RSS</h1>
+        <p className="mt-1 text-sm text-muted">创建自己的订阅链接，选择节目后复制到播客客户端。</p>
+      </div>
       {message ? <p className="text-sm text-muted">{message}</p> : null}
 
-      <div className="card space-y-3">
-        <h2 className="text-base font-medium">创建新 RSS</h2>
-        <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="RSS 名称" />
-        <div className="space-y-2">
-          {programs.map((program) => (
-            <label className="flex items-center gap-2 text-sm" key={program.id}>
-              <input type="checkbox" checked={selectedProgramIds.includes(program.id)} onChange={() => toggleProgram(program.id)} />
-              {program.title}
-            </label>
+      <div className="grid gap-4 lg:grid-cols-[360px_1fr]">
+        <section className="rounded-lg border border-line bg-white p-4">
+          <h2 className="text-base font-medium">创建新 RSS</h2>
+          <p className="mt-1 text-xs text-muted">名称会显示在你的 RSS 列表里，方便区分不同订阅。</p>
+          <div className="mt-3 space-y-3">
+            <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="RSS 名称" />
+            <div className="max-h-80 space-y-2 overflow-auto rounded border border-line p-3">
+              {programs.map((program) => (
+                <label className="flex items-center gap-2 text-sm" key={program.id}>
+                  <input type="checkbox" checked={selectedProgramIds.includes(program.id)} onChange={() => toggleProgram(program.id)} />
+                  {program.title}
+                </label>
+              ))}
+              {programs.length === 0 ? <p className="text-sm text-muted">当前没有可选节目。</p> : null}
+            </div>
+            <button className="button w-full" onClick={createFeed} disabled={selectedProgramIds.length === 0}>
+              创建 RSS
+            </button>
+          </div>
+        </section>
+
+        <section className="space-y-3">
+          {feeds.map((feed) => (
+            <article key={feed.id} className="rounded-lg border border-line bg-white p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-base font-medium">{feed.name}</h3>
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-2 text-xs">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className={`h-2 w-2 rounded-full ${feed.status === "active" ? "bg-emerald-500" : "bg-slate-300"}`} />
+                      {feed.status}
+                    </span>
+                    <span>节目 {feed.programCount}</span>
+                    <span>访问 {feed.requestCount}</span>
+                    <span>估算订阅端 {feed.subscriberEstimate}</span>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button className="button-secondary" onClick={() => copyUrl(feed)}>
+                    复制链接
+                  </button>
+                  <button className="button-secondary" onClick={() => setRotateTarget(feed)}>
+                    更新链接
+                  </button>
+                  <button className="button-secondary" onClick={() => setDeleteTarget(feed)}>
+                    删除
+                  </button>
+                </div>
+              </div>
+              <div className="mt-4 rounded border border-line bg-slate-50 p-3">
+                <p className="text-xs text-muted">当前订阅链接</p>
+                <p className="mt-1 break-all font-mono text-xs">{feed.rssUrl ?? "旧链接无法反推，请点击“更新链接”生成新链接。"}</p>
+              </div>
+              <p className="mt-3 text-xs text-muted">
+                创建时间：{feed.createdAt} / 最近访问：{feed.lastAccessedAt ?? "-"} / 最近更新链接：{feed.rotatedAt ?? "-"}
+              </p>
+            </article>
           ))}
-        </div>
-        <button className="button" onClick={createFeed} disabled={selectedProgramIds.length === 0}>
-          创建 RSS
-        </button>
+          {feeds.length === 0 ? <p className="rounded-lg border border-dashed border-line p-6 text-sm text-muted">还没有 RSS 链接。</p> : null}
+        </section>
       </div>
 
-      <div className="space-y-3">
-        {feeds.map((feed) => (
-          <article key={feed.id} className="card space-y-4">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-              <h3 className="text-base font-medium">{feed.name}</h3>
-                <p className="mt-1 text-xs text-muted">
-                  状态：{feed.status} / 节目 {feed.programCount} / 访问 {feed.requestCount} / 估算订阅端 {feed.subscriberEstimate}
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <button className="button-secondary" onClick={() => copyUrl(feed)}>
-                  复制链接
-                </button>
-                <button className="button-secondary" onClick={() => rotateFeed(feed)}>
-                  更新 RSS 链接
-                </button>
-                <button className="button-secondary" onClick={() => deleteFeed(feed)}>
-                  删除
-                </button>
-              </div>
+      {rotateTarget ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4">
+          <div className="w-full max-w-md rounded-lg border border-line bg-white p-5 shadow-xl">
+            <h2 className="text-base font-medium">更新 RSS 链接</h2>
+            <p className="mt-2 text-sm text-muted">确认更新「{rotateTarget.name}」的 RSS 链接吗？旧链接会立即失效。</p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button className="button-secondary" onClick={() => setRotateTarget(null)}>
+                取消
+              </button>
+              <button className="button" onClick={rotateFeed}>
+                确认更新
+              </button>
             </div>
-            <div className="rounded border border-line bg-slate-50 p-3">
-              <p className="text-xs text-muted">当前订阅链接</p>
-              <p className="mt-1 break-all font-mono text-xs">{feed.rssUrl ?? "旧链接无法反推，请点击“更新 RSS 链接”生成新链接。"}</p>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteTarget ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4">
+          <div className="w-full max-w-md rounded-lg border border-line bg-white p-5 shadow-xl">
+            <h2 className="text-base font-medium">删除 RSS</h2>
+            <p className="mt-2 text-sm text-muted">确认删除 RSS「{deleteTarget.name}」吗？删除后该链接不可访问。</p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button className="button-secondary" onClick={() => setDeleteTarget(null)}>
+                取消
+              </button>
+              <button className="button" onClick={deleteFeed}>
+                确认删除
+              </button>
             </div>
-            <p className="text-xs text-muted">
-              创建时间：{feed.createdAt} / 最近访问：{feed.lastAccessedAt ?? "-"} / 最近更新链接：{feed.rotatedAt ?? "-"}
-            </p>
-          </article>
-        ))}
-      </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
