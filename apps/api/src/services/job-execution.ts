@@ -2,7 +2,7 @@ import { FastifyInstance } from "fastify";
 import { env } from "../config.js";
 import { decryptSecret } from "../utils/secrets.js";
 import { applyRunnerEvents } from "./import-processing.js";
-import { assertTransition, type JobStatus } from "../utils/job-state.js";
+import { assertTransition, isTerminalJobStatus, type JobStatus } from "../utils/job-state.js";
 
 type SourceExecutionContext = {
   sourceId: string;
@@ -20,6 +20,29 @@ type SourceExecutionContext = {
 
 type TriggerType = "manual" | "scheduled" | "resume";
 
+type ImportSummary = { programs: number; episodes: number; media: number; failed: number };
+
+type JobFinalization = {
+  status: JobStatus;
+  summary?: ImportSummary;
+  outputSummary?: Record<string, unknown>;
+  errorSummary?: string | null;
+};
+
+class RunnerRequestError extends Error {
+  constructor(
+    message: string,
+    readonly timedOut: boolean
+  ) {
+    super(message);
+    this.name = "RunnerRequestError";
+  }
+}
+
+function emptyImportSummary(): ImportSummary {
+  return { programs: 0, episodes: 0, media: 0, failed: 1 };
+}
+
 function resolveWaitingStatus(events: Array<Record<string, unknown>>, fallback: JobStatus): JobStatus {
   const hasAuthRequired = events.some((event) => event.type === "auth_required");
   if (hasAuthRequired) {
@@ -32,6 +55,16 @@ function resolveWaitingStatus(events: Array<Record<string, unknown>>, fallback: 
   }
 
   return fallback;
+}
+
+export function resolveRunnerFinalStatus(status: unknown, events: Array<Record<string, unknown>>): JobStatus {
+  if (status === "failed" || status === "timeout") {
+    return status;
+  }
+  if (status === "completed" || status === "waiting_for_auth" || status === "waiting_for_input") {
+    return resolveWaitingStatus(events, status);
+  }
+  return "failed";
 }
 
 function isUnattendedAuthReady(context: SourceExecutionContext): boolean {
@@ -54,6 +87,128 @@ export async function transitionJobStatus(app: FastifyInstance, jobId: string, t
   assertTransition(from, to);
 
   await app.pg.query("update import_jobs set status = $1, updated_at = now() where id = $2", [to, jobId]);
+}
+
+async function finalizeJob(app: FastifyInstance, jobId: string, finalization: JobFinalization): Promise<JobStatus> {
+  const currentRes = await app.pg.query("select status from import_jobs where id = $1", [jobId]);
+  if ((currentRes.rowCount ?? 0) === 0) {
+    throw new Error("job not found");
+  }
+
+  const currentStatus = currentRes.rows[0].status as JobStatus;
+  if (isTerminalJobStatus(currentStatus)) {
+    return currentStatus;
+  }
+
+  assertTransition(currentStatus, finalization.status);
+  const isTerminal = isTerminalJobStatus(finalization.status);
+  const updateRes = await app.pg.query(
+    `update import_jobs
+     set status = $1,
+         ended_at = case when $2 then now() else ended_at end,
+         output_summary_json = coalesce($3::jsonb, output_summary_json),
+         discovered_programs = coalesce($4, discovered_programs),
+         discovered_episodes = coalesce($5, discovered_episodes),
+         imported_media = coalesce($6, imported_media),
+         failed_count = coalesce($7, failed_count),
+         error_summary = coalesce($8, error_summary),
+         updated_at = now()
+     where id = $9 and status = $10`,
+    [
+      finalization.status,
+      isTerminal,
+      finalization.outputSummary ? JSON.stringify(finalization.outputSummary) : null,
+      finalization.summary?.programs ?? null,
+      finalization.summary?.episodes ?? null,
+      finalization.summary?.media ?? null,
+      finalization.summary?.failed ?? null,
+      finalization.errorSummary ?? null,
+      jobId,
+      currentStatus
+    ]
+  );
+
+  if ((updateRes.rowCount ?? 0) > 0) {
+    return finalization.status;
+  }
+
+  const racedRes = await app.pg.query("select status from import_jobs where id = $1", [jobId]);
+  if ((racedRes.rowCount ?? 0) === 0) {
+    throw new Error("job not found");
+  }
+  return racedRes.rows[0].status as JobStatus;
+}
+
+async function updateSourceJobStatus(app: FastifyInstance, sourceId: string, status: JobStatus): Promise<void> {
+  await app.pg.query(
+    `update connector_sources
+     set last_job_status = $1,
+         last_success_sync_at = case when $1 = 'completed' then now() else last_success_sync_at end,
+         updated_at = now()
+     where id = $2`,
+    [status, sourceId]
+  );
+}
+
+async function requestRunner(
+  url: string,
+  body: Record<string, unknown>
+): Promise<{ response: Response; json: Record<string, any> }> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), env.RUNNER_REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    return { response, json: (await response.json()) as Record<string, any> };
+  } catch (error) {
+    const timedOut = controller.signal.aborted;
+    const detail = error instanceof Error ? error.message : "unknown runner request error";
+    throw new RunnerRequestError(
+      timedOut ? `runner request timed out after ${env.RUNNER_REQUEST_TIMEOUT_MS}ms` : `runner request failed: ${detail}`,
+      timedOut
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function recoverStaleRunningJobs(app: FastifyInstance): Promise<number> {
+  const staleRes = await app.pg.query(
+    `select id, source_id
+     from import_jobs
+     where status = 'running'
+       and updated_at < now() - ($1 * interval '1 millisecond')
+     order by updated_at asc
+     limit 100`,
+    [env.IMPORT_JOB_STALE_TIMEOUT_MS]
+  );
+
+  let recovered = 0;
+  for (const job of staleRes.rows) {
+    const status = await finalizeJob(app, job.id, {
+      status: "timeout",
+      errorSummary: `job timed out after ${env.IMPORT_JOB_STALE_TIMEOUT_MS}ms without runner activity`
+    });
+    if (status !== "timeout") {
+      continue;
+    }
+    await updateSourceJobStatus(app, job.source_id, status);
+    await writeJobLog(
+      app,
+      job.id,
+      `job recovered as timed out after ${env.IMPORT_JOB_STALE_TIMEOUT_MS}ms without runner activity`,
+      {},
+      "error"
+    );
+    recovered += 1;
+  }
+
+  return recovered;
 }
 
 async function loadSourceExecutionContext(app: FastifyInstance, sourceId: string): Promise<SourceExecutionContext | null> {
@@ -278,10 +433,10 @@ export async function executeSourceImport(
     eventCallbackBaseUrl: runnerEventCallbackBaseUrl
   });
 
-  const runnerResponse = await fetch(`${env.RUNNER_BASE_URL}/internal/run-import`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
+  let runnerResponse: Response;
+  let runnerJson: Record<string, any>;
+  try {
+    const runnerResult = await requestRunner(`${env.RUNNER_BASE_URL}/internal/run-import`, {
       jobId,
       packagePath: context.packagePath,
       manifest: context.manifestJson,
@@ -289,10 +444,27 @@ export async function executeSourceImport(
       secretConfig: context.secretConfig,
       eventCallbackUrl: `${runnerEventCallbackBaseUrl}/internal/runner/jobs/${jobId}/events`,
       eventCallbackToken: env.RUNNER_INTERNAL_TOKEN
-    })
-  });
+    });
+    runnerResponse = runnerResult.response;
+    runnerJson = runnerResult.json;
+  } catch (error) {
+    const runnerError =
+      error instanceof RunnerRequestError
+        ? error
+        : new RunnerRequestError(error instanceof Error ? `invalid runner response: ${error.message}` : "invalid runner response", false);
+    const status = await finalizeJob(app, jobId, {
+      status: runnerError.timedOut ? "timeout" : "failed",
+      errorSummary: runnerError.message
+    });
+    await updateSourceJobStatus(app, params.sourceId, status);
+    await writeJobLog(app, jobId, "runner request did not complete", { message: runnerError.message }, "error");
+    return {
+      jobId,
+      status,
+      summary: emptyImportSummary()
+    };
+  }
 
-  const runnerJson = await runnerResponse.json();
   await writeJobLog(app, jobId, "runner response received", {
     ok: runnerResponse.ok,
     status: runnerJson.status ?? null,
@@ -301,20 +473,18 @@ export async function executeSourceImport(
   }, runnerResponse.ok ? "info" : "error");
 
   if (!runnerResponse.ok) {
-    await app.pg.query(
-      `update import_jobs
-       set status = 'failed', ended_at = now(), error_summary = $1, updated_at = now()
-       where id = $2`,
-      [runnerJson.message ?? "runner execute failed", jobId]
-    );
-    await app.pg.query("update connector_sources set last_job_status = 'failed', updated_at = now() where id = $1", [params.sourceId]);
+    const status = await finalizeJob(app, jobId, {
+      status: runnerJson.status === "timeout" ? "timeout" : "failed",
+      errorSummary: typeof runnerJson.message === "string" ? runnerJson.message : "runner execute failed"
+    });
+    await updateSourceJobStatus(app, params.sourceId, status);
     await writeJobLog(app, jobId, "runner execution failed", {
       message: runnerJson.message ?? "runner execute failed"
     }, "error");
     return {
       jobId,
-      status: "failed",
-      summary: { programs: 0, episodes: 0, media: 0, failed: 1 }
+      status,
+      summary: emptyImportSummary()
     };
   }
 
@@ -325,41 +495,21 @@ export async function executeSourceImport(
     importSummary
   });
 
-  const statusFromRunner = runnerJson.status === "completed" ? "completed" : runnerJson.status === "failed" ? "failed" : "running";
-  const finalStatus = resolveWaitingStatus(events, statusFromRunner as JobStatus);
+  const finalStatus = resolveRunnerFinalStatus(runnerJson.status, events);
 
-  const isTerminal = ["completed", "failed", "cancelled", "timeout"].includes(finalStatus);
-
-  await app.pg.query(
-    `update import_jobs
-     set status = $1,
-         ended_at = case when $2 then now() else ended_at end,
-         output_summary_json = $3::jsonb,
-         discovered_programs = $4,
-         discovered_episodes = $5,
-         imported_media = $6,
-         failed_count = $7,
-         error_summary = $8,
-         updated_at = now()
-     where id = $9`,
-    [
-      finalStatus,
-      isTerminal,
-      JSON.stringify({ runnerStatus: runnerJson.status, copiedMediaCount: runnerJson.copiedMediaCount ?? 0 }),
-      importSummary.programs,
-      importSummary.episodes,
-      importSummary.media,
-      importSummary.failed,
-      runnerJson.stderr ?? null,
-      jobId
-    ]
-  );
+  const storedStatus = await finalizeJob(app, jobId, {
+    status: finalStatus,
+    summary: importSummary,
+    outputSummary: { runnerStatus: runnerJson.status, copiedMediaCount: runnerJson.copiedMediaCount ?? 0 },
+    errorSummary: typeof runnerJson.stderr === "string" ? runnerJson.stderr : null
+  });
+  const isTerminal = isTerminalJobStatus(storedStatus);
   await writeJobLog(app, jobId, "job finalized", {
-    finalStatus,
+    finalStatus: storedStatus,
     isTerminal,
     importSummary,
     errorSummary: runnerJson.stderr ?? null
-  }, finalStatus === "failed" ? "error" : "info");
+  }, storedStatus === "failed" || storedStatus === "timeout" ? "error" : "info");
 
   await app.pg.query(
     `insert into import_job_outputs (id, job_id, output_summary_json, created_at)
@@ -368,24 +518,17 @@ export async function executeSourceImport(
       jobId,
       JSON.stringify({
         runnerStatus: runnerJson.status,
-        finalStatus,
+        finalStatus: storedStatus,
         importSummary
       })
     ]
   );
 
-  await app.pg.query(
-    `update connector_sources
-     set last_job_status = $1,
-         last_success_sync_at = case when $1 = 'completed' then now() else last_success_sync_at end,
-         updated_at = now()
-     where id = $2`,
-    [finalStatus, params.sourceId]
-  );
+  await updateSourceJobStatus(app, params.sourceId, storedStatus);
 
   return {
     jobId,
-    status: finalStatus,
+    status: storedStatus,
     summary: importSummary
   };
 }

@@ -1,5 +1,5 @@
 import { FastifyInstance } from "fastify";
-import { executeSourceImport } from "../services/job-execution.js";
+import { executeSourceImport, recoverStaleRunningJobs } from "../services/job-execution.js";
 
 function parseIntervalHours(value: unknown): number {
   const parsed = Number(value);
@@ -34,6 +34,7 @@ function nextRunAt(scheduleType: string, cronExpression: string | null): Date {
 
 export async function internalScheduleRoutes(app: FastifyInstance): Promise<void> {
   app.post("/internal/schedules/tick", async () => {
+    const recovered = await recoverStaleRunningJobs(app);
     const dueRes = await app.pg.query(
       `select id, source_id, schedule_type, cron_expression
        from schedules
@@ -85,6 +86,7 @@ export async function internalScheduleRoutes(app: FastifyInstance): Promise<void
 
     return {
       checked: dueRes.rowCount ?? 0,
+      recovered,
       triggered,
       failed
     };

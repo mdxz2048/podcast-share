@@ -19,6 +19,10 @@ const transitions: Record<JobStatus, JobStatus[]> = {
   timeout: []
 };
 
+export function isTerminalJobStatus(status: JobStatus): boolean {
+  return transitions[status].length === 0;
+}
+
 export function canTransition(from: JobStatus, to: JobStatus): boolean {
   return transitions[from].includes(to);
 }

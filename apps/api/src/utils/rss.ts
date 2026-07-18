@@ -38,7 +38,10 @@ function formatDuration(seconds: number | null | undefined): string | null {
 }
 
 export function buildRssXml(feedName: string, feedUrl: string, items: FeedItem[], template?: Partial<RssTemplate>): string {
-  const sorted = [...items].sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
+  const sorted = [...items].sort((a, b) => {
+    const byPublishedAt = new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
+    return byPublishedAt !== 0 ? byPublishedAt : b.episodeId.localeCompare(a.episodeId);
+  });
   const channelImageUrl = sorted.find((item) => item.programImageUrl)?.programImageUrl?.trim() || "";
   const itemXml = sorted
     .map((item) => {

@@ -10,6 +10,8 @@ const envSchema = z.object({
   RUNNER_BASE_URL: z.string().url().default("http://localhost:4300"),
   RUNNER_EVENT_CALLBACK_BASE_URL: z.string().url().optional(),
   RUNNER_INTERNAL_TOKEN: z.string().min(8).default("runner-internal-token"),
+  RUNNER_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(86_400_000).default(1_860_000),
+  IMPORT_JOB_STALE_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(86_400_000).default(2_100_000),
   DATABASE_URL: z.string().min(1),
   MEDIA_LOCAL_ROOT: z.string().default("storage/media"),
   MAILPIT_SMTP_HOST: z.string().default("mailpit"),

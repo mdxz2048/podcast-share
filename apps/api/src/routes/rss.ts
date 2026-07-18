@@ -486,7 +486,8 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
          )
          and e.is_published = true
          and e.is_hidden = false
-         and u.email_verified_at is not null`,
+         and u.email_verified_at is not null
+        order by e.published_at desc, e.id desc`,
       [feed.id, feed.user_id]
     );
 

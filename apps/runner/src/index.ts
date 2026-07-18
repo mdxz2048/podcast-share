@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { cp, mkdtemp, mkdir, rm } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,6 +25,25 @@ const requestSchema = z.object({
 
 type RunnerEvent = Record<string, unknown> & { __runnerMediaRoot?: string };
 
+type ProcessResult = {
+	exitCode: number | null;
+	stdout: string;
+	stderr: string;
+	timedOut: boolean;
+	error?: string;
+};
+
+function parseTimeout(value: string | undefined, fallback: number): number {
+	const parsed = Number(value);
+	if (!Number.isFinite(parsed)) {
+		return fallback;
+	}
+	return Math.min(86_400_000, Math.max(1_000, Math.trunc(parsed)));
+}
+
+const processTimeoutMs = parseTimeout(process.env.RUNNER_PROCESS_TIMEOUT_MS, 1_800_000);
+const eventCallbackTimeoutMs = parseTimeout(process.env.RUNNER_EVENT_CALLBACK_TIMEOUT_MS, 10_000);
+
 function parseJsonlLines(raw: string) {
 	const events: Array<Record<string, unknown>> = [];
 	for (const line of raw.split(/\r?\n/)) {
@@ -45,27 +64,64 @@ function parseJsonlLines(raw: string) {
 async function runProcess(
 	command: string,
 	args: string[],
-	options: { cwd: string; env?: NodeJS.ProcessEnv }
-): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+	options: {
+		cwd: string;
+		env?: NodeJS.ProcessEnv;
+		timeoutMs?: number;
+		onStdout?: (text: string) => void;
+		onStderr?: (text: string) => void;
+	}
+): Promise<ProcessResult> {
 	return new Promise((resolvePromise) => {
-		const child = spawn(command, args, {
-			cwd: options.cwd,
-			env: options.env
-		});
-
 		let stdout = "";
 		let stderr = "";
+		let settled = false;
+		let child: ChildProcessWithoutNullStreams | undefined;
+		const finish = (result: ProcessResult) => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			clearTimeout(timeout);
+			resolvePromise(result);
+		};
+		const timeout = setTimeout(() => {
+			child?.kill("SIGKILL");
+			finish({ exitCode: null, stdout, stderr, timedOut: true });
+		}, options.timeoutMs ?? processTimeoutMs);
 
-		child.stdout.on("data", (chunk) => {
-			stdout += chunk.toString();
-		});
-		child.stderr.on("data", (chunk) => {
-			stderr += chunk.toString();
-		});
-
-		child.on("close", (code) => {
-			resolvePromise({ exitCode: code, stdout, stderr });
-		});
+		try {
+			const spawnedChild = spawn(command, args, {
+				cwd: options.cwd,
+				env: options.env
+			});
+			child = spawnedChild;
+			spawnedChild.stdout.on("data", (chunk) => {
+				const text = chunk.toString();
+				stdout += text;
+				options.onStdout?.(text);
+			});
+			spawnedChild.stderr.on("data", (chunk) => {
+				const text = chunk.toString();
+				stderr += text;
+				options.onStderr?.(text);
+			});
+			spawnedChild.on("error", (error) => {
+				finish({ exitCode: null, stdout, stderr, timedOut: false, error: error.message });
+			});
+			spawnedChild.on("close", (code) => {
+				finish({ exitCode: code, stdout, stderr, timedOut: false });
+			});
+		} catch (error) {
+			finish({
+				exitCode: null,
+				stdout,
+				stderr,
+				timedOut: false,
+				error: error instanceof Error ? error.message : "failed to start process"
+			});
+			return;
+		}
 	});
 }
 
@@ -78,6 +134,8 @@ async function postRunnerEvent(
 		return;
 	}
 
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), eventCallbackTimeoutMs);
 	try {
 		const response = await fetch(callbackUrl, {
 			method: "POST",
@@ -85,13 +143,16 @@ async function postRunnerEvent(
 				"content-type": "application/json",
 				...(callbackToken ? { "x-runner-token": callbackToken } : {})
 			},
-			body: JSON.stringify(event)
+			body: JSON.stringify(event),
+			signal: controller.signal
 		});
 		if (!response.ok) {
 			app.log.warn({ status: response.status, callbackUrl, eventType: event.eventType }, "runner event callback failed");
 		}
 	} catch (error) {
 		app.log.warn({ error, callbackUrl, eventType: event.eventType }, "runner event callback error");
+	} finally {
+		clearTimeout(timeout);
 	}
 }
 
@@ -169,6 +230,9 @@ app.post("/internal/run-import", async (request, reply) => {
 			cwd: extractedDir,
 			env: process.env
 		});
+		if (venvCreate.timedOut) {
+			return reply.status(504).send({ status: "timeout", message: "创建 Python 虚拟环境超时" });
+		}
 		if (venvCreate.exitCode !== 0) {
 			await postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, {
 				eventType: "runner_setup",
@@ -192,6 +256,9 @@ app.post("/internal/run-import", async (request, reply) => {
 			cwd: extractedDir,
 			env: process.env
 		});
+		if (pipInstallTools.timedOut) {
+			return reply.status(504).send({ status: "timeout", message: "初始化 Python 依赖环境超时" });
+		}
 		if (pipInstallTools.exitCode !== 0) {
 			await postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, {
 				eventType: "runner_setup",
@@ -215,6 +282,9 @@ app.post("/internal/run-import", async (request, reply) => {
 				cwd: extractedDir,
 				env: process.env
 			});
+			if (pipInstallDeps.timedOut) {
+				return reply.status(504).send({ status: "timeout", message: "安装 connector 依赖超时" });
+			}
 			if (pipInstallDeps.exitCode !== 0) {
 				await postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, {
 					eventType: "runner_setup",
@@ -235,67 +305,48 @@ app.post("/internal/run-import", async (request, reply) => {
 			message: "launching connector entrypoint"
 		});
 
-		const runResult = await new Promise<{ exitCode: number | null; stdout: string; stderr: string }>((resolvePromise) => {
-			const child = spawn(venvPython, [entrypoint], {
-				cwd: extractedDir,
-				env: {
-					...process.env,
-					CONNECTOR_INPUT_JSON: JSON.stringify(body.inputConfig ?? {}),
-					CONNECTOR_SECRET_JSON: JSON.stringify(body.secretConfig ?? {}),
-					CONNECTOR_OUTPUT_ROOT: workOutputDir
-				}
+		let stdoutBuffer = "";
+		let stderrBuffer = "";
+		const flushBufferedLine = (channel: "stdout" | "stderr", line: string) => {
+			void postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, {
+				eventType: channel === "stdout" ? "runner_stdout" : "runner_stderr",
+				level: channel === "stdout" ? "info" : "warn",
+				message: line,
+				payload: { channel }
 			});
-
-			let stdout = "";
-			let stderr = "";
-			let stdoutBuffer = "";
-			let stderrBuffer = "";
-
-			const flushBufferedLine = (channel: "stdout" | "stderr", line: string) => {
-				void postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, {
-					eventType: channel === "stdout" ? "runner_stdout" : "runner_stderr",
-					level: channel === "stdout" ? "info" : "warn",
-					message: line,
-					payload: { channel }
-				});
-			};
-
-			child.stdout.on("data", (chunk) => {
-				const text = chunk.toString();
-				stdout += text;
-				stdoutBuffer += text;
-				const lines = stdoutBuffer.split(/\r?\n/);
-				stdoutBuffer = lines.pop() ?? "";
-				for (const line of lines) {
-					if (line.trim()) {
-						flushBufferedLine("stdout", line);
-					}
+		};
+		const reportLines = (channel: "stdout" | "stderr", text: string) => {
+			const combined = `${channel === "stdout" ? stdoutBuffer : stderrBuffer}${text}`;
+			const lines = combined.split(/\r?\n/);
+			const remainder = lines.pop() ?? "";
+			if (channel === "stdout") {
+				stdoutBuffer = remainder;
+			} else {
+				stderrBuffer = remainder;
+			}
+			for (const line of lines) {
+				if (line.trim()) {
+					flushBufferedLine(channel, line);
 				}
-			});
-
-			child.stderr.on("data", (chunk) => {
-				const text = chunk.toString();
-				stderr += text;
-				stderrBuffer += text;
-				const lines = stderrBuffer.split(/\r?\n/);
-				stderrBuffer = lines.pop() ?? "";
-				for (const line of lines) {
-					if (line.trim()) {
-						flushBufferedLine("stderr", line);
-					}
-				}
-			});
-
-			child.on("close", (code) => {
-				if (stdoutBuffer.trim()) {
-					flushBufferedLine("stdout", stdoutBuffer.trim());
-				}
-				if (stderrBuffer.trim()) {
-					flushBufferedLine("stderr", stderrBuffer.trim());
-				}
-				resolvePromise({ exitCode: code, stdout, stderr });
-			});
+			}
+		};
+		const runResult = await runProcess(venvPython, [entrypoint], {
+			cwd: extractedDir,
+			env: {
+				...process.env,
+				CONNECTOR_INPUT_JSON: JSON.stringify(body.inputConfig ?? {}),
+				CONNECTOR_SECRET_JSON: JSON.stringify(body.secretConfig ?? {}),
+				CONNECTOR_OUTPUT_ROOT: workOutputDir
+			},
+			onStdout: (text) => reportLines("stdout", text),
+			onStderr: (text) => reportLines("stderr", text)
 		});
+		if (stdoutBuffer.trim()) {
+			flushBufferedLine("stdout", stdoutBuffer.trim());
+		}
+		if (stderrBuffer.trim()) {
+			flushBufferedLine("stderr", stderrBuffer.trim());
+		}
 
 		const events: RunnerEvent[] = parseJsonlLines(runResult.stdout).map((item) => ({ ...item, __runnerMediaRoot: workOutputDir }));
 		if (runResult.stderr.trim()) {
@@ -310,7 +361,11 @@ app.post("/internal/run-import", async (request, reply) => {
 
 		const hasAuthRequired = normalizedEvents.some((item) => item.type === "auth_required");
 		const hasInputRequired = normalizedEvents.some((item) => item.type === "input_required");
-		let status: "completed" | "failed" | "waiting_for_input" | "waiting_for_auth" = runResult.exitCode === 0 ? "completed" : "failed";
+		let status: "completed" | "failed" | "timeout" | "waiting_for_input" | "waiting_for_auth" = runResult.timedOut
+			? "timeout"
+			: runResult.exitCode === 0
+				? "completed"
+				: "failed";
 		if (runResult.exitCode === 0 && hasAuthRequired) {
 			status = "waiting_for_auth";
 		} else if (runResult.exitCode === 0 && hasInputRequired) {
@@ -322,7 +377,7 @@ app.post("/internal/run-import", async (request, reply) => {
 			exitCode: runResult.exitCode,
 			events: normalizedEvents,
 			copiedMediaCount: copiedMedia.length,
-			stderr: runResult.stderr || null
+			stderr: runResult.stderr || runResult.error || null
 		};
 	} catch (error) {
 		request.log.error(error);

@@ -85,6 +85,10 @@ export async function internalRunnerEventRoutes(app: FastifyInstance): Promise<v
        values (gen_random_uuid(), $1, $2, $3, $4, $5::jsonb, now())`,
       [jobId, body.eventType, body.level ?? null, body.message ?? null, JSON.stringify(body.payload)]
     );
+    await app.pg.query(
+      "update import_jobs set updated_at = now() where id = $1 and status = 'running'",
+      [jobId]
+    );
 
     if (body.eventType === "auth_update" && body.sensitiveEvent) {
       await applyAuthUpdateEvent(app, jobRes.rows[0].source_id, body.sensitiveEvent);
