@@ -11,6 +11,7 @@ const app = Fastify({ logger: true });
 
 const requestSchema = z.object({
 	jobId: z.string().uuid(),
+	triggerType: z.enum(["manual", "scheduled", "resume"]).default("manual"),
 	packagePath: z.string().min(1),
 	manifest: z.object({
 		runtime: z.object({
@@ -70,6 +71,7 @@ async function runProcess(
 		timeoutMs?: number;
 		onStdout?: (text: string) => void;
 		onStderr?: (text: string) => void;
+		signal?: AbortSignal;
 	}
 ): Promise<ProcessResult> {
 	return new Promise((resolvePromise) => {
@@ -77,25 +79,42 @@ async function runProcess(
 		let stderr = "";
 		let settled = false;
 		let child: ChildProcessWithoutNullStreams | undefined;
+		const killProcessTree = () => {
+			if (!child?.pid) return;
+			if (process.platform === "win32") {
+				spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true });
+			} else {
+				try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+			}
+		};
+		const abort = () => {
+			killProcessTree();
+			finish({ exitCode: null, stdout, stderr, timedOut: false, error: "job cancelled" });
+		};
 		const finish = (result: ProcessResult) => {
 			if (settled) {
 				return;
 			}
 			settled = true;
 			clearTimeout(timeout);
+			options.signal?.removeEventListener("abort", abort);
 			resolvePromise(result);
 		};
 		const timeout = setTimeout(() => {
-			child?.kill("SIGKILL");
+			killProcessTree();
 			finish({ exitCode: null, stdout, stderr, timedOut: true });
 		}, options.timeoutMs ?? processTimeoutMs);
 
 		try {
 			const spawnedChild = spawn(command, args, {
 				cwd: options.cwd,
-				env: options.env
+				env: options.env,
+				detached: process.platform !== "win32",
+				windowsHide: true
 			});
 			child = spawnedChild;
+			options.signal?.addEventListener("abort", abort, { once: true });
+			if (options.signal?.aborted) abort();
 			spawnedChild.stdout.on("data", (chunk) => {
 				const text = chunk.toString();
 				stdout += text;
@@ -128,10 +147,11 @@ async function runProcess(
 async function postRunnerEvent(
 	callbackUrl: string | undefined,
 	callbackToken: string | undefined,
-	event: { eventType: string; level?: string | null; message?: string | null; payload?: Record<string, unknown> }
+	event: { eventType: string; level?: string | null; message?: string | null; payload?: Record<string, unknown> },
+	onInactive?: () => void
 ) {
 	if (!callbackUrl) {
-		return;
+		return false;
 	}
 
 	const controller = new AbortController();
@@ -146,11 +166,14 @@ async function postRunnerEvent(
 			body: JSON.stringify(event),
 			signal: controller.signal
 		});
+		if (response.status === 409) onInactive?.();
 		if (!response.ok) {
 			app.log.warn({ status: response.status, callbackUrl, eventType: event.eventType }, "runner event callback failed");
 		}
+		return response.ok;
 	} catch (error) {
 		app.log.warn({ error, callbackUrl, eventType: event.eventType }, "runner event callback error");
+		return false;
 	} finally {
 		clearTimeout(timeout);
 	}
@@ -217,8 +240,8 @@ app.post("/internal/run-import", async (request, reply) => {
 		const pythonCmd = process.env.RUNNER_PYTHON_CMD ?? "python3";
 		const requirementsPath = resolve(extractedDir, "requirements.lock");
 		const venvDir = resolve(tempDir, "venv");
-		const venvPython = resolve(venvDir, "bin/python3");
-		const venvPip = resolve(venvDir, "bin/pip3");
+		const venvPython = resolve(venvDir, process.platform === "win32" ? "Scripts/python.exe" : "bin/python3");
+		const venvPip = resolve(venvDir, process.platform === "win32" ? "Scripts/pip.exe" : "bin/pip3");
 
 		await postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, {
 			eventType: "runner_setup",
@@ -299,6 +322,18 @@ app.post("/internal/run-import", async (request, reply) => {
 			}
 		}
 
+		if (existsSync(requirementsPath) && /^playwright(?:[=<>!~\[]|\s|$)/m.test(readFileSync(requirementsPath, "utf8"))) {
+			await postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, {
+				eventType: "runner_setup", level: "info", message: "preparing headless Chromium for QR login"
+			});
+			const browserSetup = await runProcess(venvPython, ["-m", "playwright", "install", "chromium"], {
+				cwd: extractedDir, env: process.env
+			});
+			if (browserSetup.exitCode !== 0 || browserSetup.timedOut) {
+				return reply.status(500).send({ status: "failed", message: "扫码浏览器安装失败", stderr: browserSetup.stderr });
+			}
+		}
+
 		await postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, {
 			eventType: "runner_setup",
 			level: "info",
@@ -307,12 +342,36 @@ app.post("/internal/run-import", async (request, reply) => {
 
 		let stdoutBuffer = "";
 		let stderrBuffer = "";
+		// Preserve event order: the QR challenge must arrive before its login result.
+		const executionAbort = new AbortController();
+		let callbackQueue = Promise.resolve();
+		let authTimer: ReturnType<typeof setTimeout> | undefined;
+		let authTimedOut = false;
+		const deliveredAuthLines = new Set<string>();
 		const flushBufferedLine = (channel: "stdout" | "stderr", line: string) => {
-			void postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, {
+			let event: { eventType: string; level: string; message: string; payload: Record<string, unknown> } = {
 				eventType: channel === "stdout" ? "runner_stdout" : "runner_stderr",
-				level: channel === "stdout" ? "info" : "warn",
-				message: line,
-				payload: { channel }
+				level: channel === "stdout" ? "info" : "warn", message: line, payload: { channel }
+			};
+			if (channel === "stdout") {
+				try {
+					const parsed = JSON.parse(line);
+					if (["auth_challenge", "auth_result", "qr_image", "auth_update", "auth_required"].includes(parsed.type)) {
+						event = { eventType: parsed.type, level: parsed.level ?? "info", message: parsed.message ?? "", payload: parsed };
+					}
+				} catch { /* Plain process output remains a terminal log. */ }
+			}
+			callbackQueue = callbackQueue.then(async () => {
+				if (["auth_challenge", "qr_image"].includes(event.eventType) && !authTimer) {
+                    authTimer = setTimeout(() => { authTimedOut = true; executionAbort.abort(); }, 60_000);
+                }
+                if (event.eventType === "auth_result" && event.payload.status === "authenticated") {
+                    clearTimeout(authTimer); authTimer = undefined;
+                }
+                const delivered = await postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, event, () => executionAbort.abort());
+				if (delivered && ["auth_challenge", "auth_result", "qr_image", "auth_update", "auth_required"].includes(event.eventType)) {
+					deliveredAuthLines.add(line);
+				}
 			});
 		};
 		const reportLines = (channel: "stdout" | "stderr", text: string) => {
@@ -330,17 +389,28 @@ app.post("/internal/run-import", async (request, reply) => {
 				}
 			}
 		};
+		const heartbeat = setInterval(() => {
+			callbackQueue = callbackQueue.then(async () => {
+				await postRunnerEvent(body.eventCallbackUrl, body.eventCallbackToken, {
+					eventType: "runner_heartbeat", message: "connector process is active"
+				}, () => executionAbort.abort());
+			});
+		}, 15_000);
 		const runResult = await runProcess(venvPython, [entrypoint], {
 			cwd: extractedDir,
+			signal: executionAbort.signal,
 			env: {
 				...process.env,
 				CONNECTOR_INPUT_JSON: JSON.stringify(body.inputConfig ?? {}),
 				CONNECTOR_SECRET_JSON: JSON.stringify(body.secretConfig ?? {}),
+				CONNECTOR_TRIGGER_TYPE: body.triggerType,
 				CONNECTOR_OUTPUT_ROOT: workOutputDir
 			},
 			onStdout: (text) => reportLines("stdout", text),
 			onStderr: (text) => reportLines("stderr", text)
 		});
+		clearInterval(heartbeat);
+		clearTimeout(authTimer);
 		if (stdoutBuffer.trim()) {
 			flushBufferedLine("stdout", stdoutBuffer.trim());
 		}
@@ -348,12 +418,18 @@ app.post("/internal/run-import", async (request, reply) => {
 			flushBufferedLine("stderr", stderrBuffer.trim());
 		}
 
-		const events: RunnerEvent[] = parseJsonlLines(runResult.stdout).map((item) => ({ ...item, __runnerMediaRoot: workOutputDir }));
+		await callbackQueue;
+
+		const events: RunnerEvent[] = runResult.stdout.split(/\r?\n/).filter((line) => line.trim()).flatMap((line) =>
+			parseJsonlLines(line).map((item) => ({ ...item, __runnerMediaRoot: workOutputDir,
+				...(deliveredAuthLines.has(line) ? { __runnerEventDelivered: true } : {})
+			}))
+		);
 		if (runResult.stderr.trim()) {
 			events.push({ type: "log", level: "warn", message: runResult.stderr.trim() });
 		}
 
-		const copiedMedia = await stageMediaFiles(body.jobId, events);
+		const copiedMedia = executionAbort.signal.aborted ? [] : await stageMediaFiles(body.jobId, events);
 		const normalizedEvents = events.map((item) => {
 			const { __runnerMediaRoot, ...rest } = item;
 			return rest;
@@ -361,7 +437,7 @@ app.post("/internal/run-import", async (request, reply) => {
 
 		const hasAuthRequired = normalizedEvents.some((item) => item.type === "auth_required");
 		const hasInputRequired = normalizedEvents.some((item) => item.type === "input_required");
-		let status: "completed" | "failed" | "timeout" | "waiting_for_input" | "waiting_for_auth" = runResult.timedOut
+		let status: "completed" | "failed" | "timeout" | "waiting_for_input" | "waiting_for_auth" = (runResult.timedOut || authTimedOut)
 			? "timeout"
 			: runResult.exitCode === 0
 				? "completed"
@@ -386,7 +462,7 @@ app.post("/internal/run-import", async (request, reply) => {
 			message: error instanceof Error ? error.message : "runner 执行失败"
 		});
 	} finally {
-		await rm(tempDir, { recursive: true, force: true });
+		await rm(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
 	}
 });
 

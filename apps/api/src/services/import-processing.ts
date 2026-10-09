@@ -214,6 +214,10 @@ export async function applyRunnerEvents(
 
   for (const event of events) {
     const eventType = typeof event.type === "string" ? event.type : "log";
+    // These events were already validated, stored and applied by the live callback.
+    if (event.__runnerEventDelivered === true && ["auth_challenge", "auth_result", "qr_image", "auth_update", "auth_required"].includes(eventType)) {
+      continue;
+    }
     const level = typeof event.level === "string" ? event.level : null;
     const message = typeof event.message === "string" ? event.message : null;
 

@@ -549,18 +549,23 @@ export async function adminSourceRoutes(app: FastifyInstance): Promise<void> {
     const { sourceId } = z.object({ sourceId: z.string().uuid() }).parse(request.params);
 
     try {
-      const result = await executeSourceImport(app, {
-        sourceId,
-        triggerType: "manual",
-        createdBy: request.user.id
+      const waiting = await app.pg.query(
+        "select id from import_jobs where source_id = $1 and status = 'waiting_for_auth' order by created_at desc limit 1", [sourceId]
+      );
+      const existingJobId = waiting.rows[0]?.id as string | undefined;
+      const jobId = await new Promise<string>((resolveStarted, rejectStarted) => {
+        void executeSourceImport(app, {
+          sourceId,
+          triggerType: existingJobId ? "resume" : "manual",
+          existingJobId,
+          createdBy: request.user!.id,
+          onStarted: resolveStarted
+        }).catch((error) => {
+          rejectStarted(error);
+          request.log.error({ err: error, sourceId }, "manual import failed");
+        });
       });
-
-      return {
-        message: result.status === "completed" ? "任务完成" : "任务执行中",
-        jobId: result.jobId,
-        status: result.status,
-        summary: result.summary
-      };
+      return reply.status(202).send({ message: "任务已启动", jobId, status: "running" });
     } catch (error) {
       return reply.status(400).send({ message: error instanceof Error ? error.message : "任务执行失败" });
     }

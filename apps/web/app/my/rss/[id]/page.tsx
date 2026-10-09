@@ -1,10 +1,13 @@
 "use client";
 
+import { useParams } from "next/navigation";
+
 import { useEffect, useState } from "react";
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
 
-export default function RssEditPage({ params }: { params: { id: string } }) {
+export default function RssEditPage() {
+  const params = useParams<{ id: string }>();
   const [name, setName] = useState("");
   const [message, setMessage] = useState("加载中...");
 

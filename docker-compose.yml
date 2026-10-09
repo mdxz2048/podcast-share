@@ -42,8 +42,11 @@ services:
       - postgres
 
   runner:
-    image: node:20-alpine
+    build:
+      context: .
+      dockerfile: deploy/docker/runner.Dockerfile
     working_dir: /workspace
+    init: true
     command: sh -c "corepack enable && pnpm install && pnpm --filter @podcast-hub/runner dev"
     volumes:
       - ./:/workspace

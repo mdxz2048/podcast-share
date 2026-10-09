@@ -1,5 +1,7 @@
 "use client";
 
+import { useParams } from "next/navigation";
+
 import { useEffect, useState } from "react";
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
@@ -31,7 +33,8 @@ function toggleId(items: string[], id: string): string[] {
   return items.includes(id) ? items.filter((item) => item !== id) : [...items, id];
 }
 
-export default function AdminProgramDetailPage({ params }: { params: { id: string } }) {
+export default function AdminProgramDetailPage() {
+  const params = useParams<{ id: string }>();
   const [program, setProgram] = useState<ProgramDetail | null>(null);
   const [mode, setMode] = useState<VisibilityMode>("closed");
   const [selectedAudienceGroupIds, setSelectedAudienceGroupIds] = useState<string[]>([]);

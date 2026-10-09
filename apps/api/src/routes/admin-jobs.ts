@@ -39,10 +39,10 @@ function normalizeJobEvent(row: {
         };
       }
 
-      if (parsed.type === "qr_image") {
+      if (["qr_image", "auth_challenge", "auth_result", "auth_required"].includes(String(parsed.type))) {
         return {
           ...row,
-          event_type: "qr_image",
+          event_type: String(parsed.type),
           level: typeof parsed.level === "string" ? parsed.level : row.level,
           message: parsed.message,
           payload_json: {
@@ -216,6 +216,13 @@ export async function adminJobRoutes(app: FastifyInstance): Promise<void> {
     await app.pg.query(
       `insert into import_job_events (id, job_id, event_type, level, message, payload_json, created_at)
        values (gen_random_uuid(), $1, 'cancelled', 'info', 'job cancelled by admin', '{}'::jsonb, now())`,
+      [jobId]
+    );
+
+    await app.pg.query(
+      `update connector_sources s set last_job_status = 'cancelled', updated_at = now()
+       from import_jobs j where j.id = $1 and s.id = j.source_id
+       and not exists (select 1 from import_jobs newer where newer.source_id = s.id and newer.created_at > j.created_at)`,
       [jobId]
     );
 

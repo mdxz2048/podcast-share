@@ -1,5 +1,7 @@
 "use client";
 
+import { useParams } from "next/navigation";
+
 import { useEffect, useState } from "react";
 
 type Episode = {
@@ -13,7 +15,8 @@ type Episode = {
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
 
-export default function ProgramDetailPage({ params }: { params: { id: string } }) {
+export default function ProgramDetailPage() {
+  const params = useParams<{ id: string }>();
   const [title, setTitle] = useState("节目详情");
   const [description, setDescription] = useState<string | null>(null);
   const [episodes, setEpisodes] = useState<Episode[]>([]);

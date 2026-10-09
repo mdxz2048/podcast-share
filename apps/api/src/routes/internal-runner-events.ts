@@ -1,5 +1,6 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { redactAuthEvent, validateAuthEvent } from "../utils/auth-events.js";
 import { env } from "../config.js";
 import { applyAuthUpdateEvent } from "../services/import-processing.js";
 
@@ -12,6 +13,9 @@ const payloadSchema = z.object({
 
 function normalizeRunnerEvent(body: z.infer<typeof payloadSchema>) {
   const payload = body.payload ?? {};
+  if (body.eventType === "auth_update") {
+    return { ...body, payload: redactAuthEvent(payload), sensitiveEvent: { ...payload, type: "auth_update" } };
+  }
   if ((body.eventType !== "runner_stdout" && body.eventType !== "runner_stderr") || !body.message) {
     return { ...body, payload };
   }
@@ -34,9 +38,9 @@ function normalizeRunnerEvent(body: z.infer<typeof payloadSchema>) {
         };
       }
 
-      if (parsed.type === "qr_image") {
+      if (["qr_image", "auth_challenge", "auth_result", "auth_required"].includes(String(parsed.type))) {
         return {
-          eventType: "qr_image",
+          eventType: String(parsed.type),
           level: typeof parsed.level === "string" ? parsed.level : body.level,
           message: parsed.message,
           payload: {
@@ -75,9 +79,16 @@ export async function internalRunnerEventRoutes(app: FastifyInstance): Promise<v
       sensitiveEvent?: Record<string, unknown>;
     };
 
-    const jobRes = await app.pg.query("select id, source_id from import_jobs where id = $1", [jobId]);
+    if (!validateAuthEvent(body.eventType, body.payload)) {
+      return reply.status(400).send({ message: "invalid authentication event" });
+    }
+    const jobRes = await app.pg.query("select id, source_id, status from import_jobs where id = $1", [jobId]);
     if ((jobRes.rowCount ?? 0) === 0) {
       return reply.status(404).send({ message: "job not found" });
+    }
+
+    if (["completed", "failed", "cancelled", "timeout"].includes(jobRes.rows[0].status)) {
+      return reply.status(409).send({ message: "job is no longer active" });
     }
 
     await app.pg.query(
@@ -90,6 +101,9 @@ export async function internalRunnerEventRoutes(app: FastifyInstance): Promise<v
       [jobId]
     );
 
+    if (body.eventType === "auth_required") {
+      await app.pg.query("update connector_sources set auth_status = 'expired', auth_unattended_ready = false, updated_at = now() where id = $1", [jobRes.rows[0].source_id]);
+    }
     if (body.eventType === "auth_update" && body.sensitiveEvent) {
       await applyAuthUpdateEvent(app, jobRes.rows[0].source_id, body.sensitiveEvent);
     }

@@ -1,5 +1,6 @@
 "use client";
 
+import { ConnectorAuthDialog } from "../../../components/connector-auth-dialog";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 
@@ -209,6 +210,11 @@ export default function AdminSourcesPage() {
       return;
     }
     setActiveJobStatus(json.status ?? "");
+    setItems((current) => current.map((source) => source.activeJob?.id === jobId ? {
+      ...source,
+      inUse: ["queued", "running", "waiting_for_input", "waiting_for_auth"].includes(json.status),
+      activeJob: ["queued", "running", "waiting_for_input", "waiting_for_auth"].includes(json.status) ? { id: jobId, status: json.status } : null
+    } : source));
     setJobEvents(json.events ?? []);
     return json as { status?: string; events?: JobEvent[] };
   }
@@ -239,7 +245,7 @@ export default function AdminSourcesPage() {
   }
 
   async function runSourceNow(source: Source) {
-    if (source.activeJob) {
+    if (source.activeJob && source.activeJob.status !== "waiting_for_auth") {
       await openJobTerminal(source.activeJob.id, source.activeJob.status);
       return;
     }
@@ -292,6 +298,14 @@ export default function AdminSourcesPage() {
     }
   }
 
+  async function cancelActiveJob() {
+    if (!activeJobId) return;
+    const res = await fetch(`${apiBase}/admin/jobs/${activeJobId}/cancel`, { method: "POST", credentials: "include" });
+    const json = await res.json();
+    setMessage(json.message ?? (res.ok ? "任务已停止" : "停止失败"));
+    await loadJob(activeJobId);
+  }
+
   async function submitJobInput(text: string) {
     if (!activeJobId) {
       setMessage("当前没有可提交输入的任务");
@@ -315,12 +329,12 @@ export default function AdminSourcesPage() {
   }
 
   useEffect(() => {
-    if (!terminalOpen || !activeJobId) return;
+    if (!activeJobId || ["completed", "failed", "cancelled", "timeout"].includes(activeJobStatus)) return;
     const timer = setInterval(async () => {
       await loadJob(activeJobId);
     }, 2000);
     return () => clearInterval(timer);
-  }, [terminalOpen, activeJobId]);
+  }, [activeJobId, activeJobStatus]);
 
   useEffect(() => {
     if (terminalOpen) focusTerminalInput();
@@ -629,7 +643,7 @@ export default function AdminSourcesPage() {
                   onClick={() => runSourceNow(item)}
                   title={!item.enabled ? "Source 已停用，请先启用" : item.activeJob ? "查看当前运行终端" : "立即运行并打开终端"}
                 >
-                  {item.activeJob ? "查看终端" : "立即同步"}
+                  {item.activeJob?.status === "waiting_for_auth" ? "扫码登录并继续" : item.activeJob ? "查看终端" : "立即同步"}
                 </button>
                 <button className="button-secondary" onClick={() => openRunSettings(item)}>
                   运行设置
@@ -804,6 +818,8 @@ export default function AdminSourcesPage() {
         </div>
       ) : null}
 
+      <ConnectorAuthDialog jobId={activeJobId} status={activeJobStatus} events={jobEvents} />
+
       {terminalOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4">
           <div
@@ -861,6 +877,9 @@ export default function AdminSourcesPage() {
             </div>
 
             <div className="flex gap-2">
+              <button className="button-secondary" disabled={!activeJobId || ["completed", "failed", "cancelled", "timeout"].includes(activeJobStatus)} onClick={cancelActiveJob}>
+                停止任务
+              </button>
               <button className="button-secondary" onClick={() => activeJobId && loadJob(activeJobId)}>
                 刷新日志
               </button>

@@ -1,5 +1,7 @@
 "use client";
 
+import { useParams } from "next/navigation";
+
 import { useEffect, useState } from "react";
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
@@ -21,7 +23,8 @@ type SourceRef = {
   lastSuccessSyncAt: string | null;
 };
 
-export default function AdminConnectorDetailPage({ params }: { params: { id: string } }) {
+export default function AdminConnectorDetailPage() {
+  const params = useParams<{ id: string }>();
   const [name, setName] = useState("");
   const [status, setStatus] = useState("");
   const [sourceCount, setSourceCount] = useState(0);

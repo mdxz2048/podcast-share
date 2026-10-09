@@ -1,0 +1,60 @@
+schema_version: 1
+name: shangfafadawang-xet
+display_name: 发发大王播客导入器
+version: 1.1.1
+description: 自动下载发发大王播客音频，每半天运行一次，使用 kotoken.create 自动刷新 H5 cookie。
+runtime:
+  language: python
+  entrypoint: src/connector.py
+run_modes:
+  manual: true
+  scheduled: true
+schedule:
+  minimum_interval_minutes: 120
+  recommended_interval_minutes: 720
+authentication:
+  modes:
+    - qr_interactive
+    - source_secret_session
+  unattended_supported: true
+inputs:
+  - key: source_name
+    label: 来源名称
+    type: text
+    required: true
+    default: shangfafadawang
+  - key: program_title
+    label: 节目标题
+    type: text
+    required: true
+    default: 发发大王
+  - key: program_description
+    label: 节目简介
+    type: text
+    required: false
+    default: 发发大王音频节目。
+  - key: limit
+    label: 单次下载上限 (0=不限制)
+    type: number
+    required: false
+    default: 0
+  - key: max_scan
+    label: 扫描窗口上限 (0=全量扫描)
+    type: number
+    required: false
+    default: 0
+secrets:
+  - key: xet_cookie_jar
+    label: 小鹅通 cookie jar（自动维护）
+    required: false
+  - key: xet_browser_state
+    label: 小鹅通浏览器会话（自动维护）
+    required: false
+  - key: xet_auth_store
+    label: 旧版本 Cookie（兼容迁移）
+    required: false
+output:
+  protocol: podcast-hub-jsonl-v1
+  media_root: /work/output/media
+
+  # Session data is provided by the platform, never packaged in the connector.

@@ -1,4 +1,5 @@
 import AdmZip from "adm-zip";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { validateConnectorZip } from "../src/utils/connector-validation.js";
 
@@ -38,6 +39,15 @@ output:
 }
 
 describe("connector zip validation", () => {
+  it("accepts the packaged WeChat connector without bundled credentials", () => {
+    const buffer = readFileSync(new URL("../../../upload-ready/shangfafadawang-xet-1.1.1.zip", import.meta.url));
+    const result = validateConnectorZip(buffer);
+    expect(result.manifest.version).toBe("1.1.1");
+    expect(result.manifest.authentication.modes).toContain("qr_interactive");
+    const names = new AdmZip(buffer).getEntries().map((entry) => entry.entryName);
+    expect(names).toContain("scripts/wx_login.py");
+    expect(names.some((name) => name.includes("runtime_data"))).toBe(false);
+  });
   it("accepts a valid python connector package", () => {
     const result = validateConnectorZip(buildValidZipBuffer());
     expect(result.manifest.name).toBe("fixture-program-downloader");

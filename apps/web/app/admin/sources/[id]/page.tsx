@@ -1,5 +1,8 @@
 "use client";
 
+import { useParams } from "next/navigation";
+
+import { ConnectorAuthDialog } from "../../../../components/connector-auth-dialog";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 
@@ -12,7 +15,8 @@ function formatBytes(value: number) {
   return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`;
 }
 
-export default function AdminSourceDetailPage({ params }: { params: { id: string } }) {
+export default function AdminSourceDetailPage() {
+  const params = useParams<{ id: string }>();
   const [name, setName] = useState("");
   const [enabled, setEnabled] = useState(false);
   const [sourceMeta, setSourceMeta] = useState<{
@@ -44,8 +48,6 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
   >([]);
   const terminalBodyRef = useRef<HTMLDivElement | null>(null);
   const terminalInputRef = useRef<HTMLTextAreaElement | null>(null);
-  const autoResumeAttemptedRef = useRef<Set<string>>(new Set());
-
   function focusTerminalInput() {
     terminalInputRef.current?.focus();
   }
@@ -136,46 +138,15 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
     }
 
     setActiveJobStatus(json.status ?? "");
+    setSourceMeta((previous) => ({ ...previous,
+      inUse: ["queued", "running", "waiting_for_input", "waiting_for_auth"].includes(json.status),
+      activeJob: ["queued", "running", "waiting_for_input", "waiting_for_auth"].includes(json.status) ? { id: jobId, status: json.status } : null
+    }));
     setJobEvents(json.events ?? []);
     return json as {
       status?: string;
       events?: Array<{ event_type?: string }>;
     };
-  }
-
-  async function autoResumeQrIfNeeded(jobId: string, jobDetail?: { status?: string; events?: Array<{ event_type?: string }> }) {
-    if (autoResumeAttemptedRef.current.has(jobId)) {
-      return;
-    }
-
-    const detail =
-      jobDetail ??
-      ((await loadJob(jobId)) as {
-        status?: string;
-        events?: Array<{ event_type?: string }>;
-      });
-
-    const waitingForAuth = detail?.status === "waiting_for_auth";
-    const hasAuthRequired = (detail?.events ?? []).some((event) => event?.event_type === "auth_required");
-    if (!waitingForAuth || !hasAuthRequired) {
-      return;
-    }
-
-    autoResumeAttemptedRef.current.add(jobId);
-    const res = await fetch(`${apiBase}/admin/jobs/${jobId}/submit-input`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ input: { qr_confirmed: true } })
-    });
-    const json = await res.json();
-    if (!res.ok) {
-      setMessage(json.message ?? "自动确认扫码失败，请手动输入 qr_confirmed=true");
-      return;
-    }
-
-    setMessage("已自动提交 qr_confirmed=true，任务继续执行中...");
-    await loadJob(jobId);
   }
 
   async function load() {
@@ -247,6 +218,7 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
   }
 
   async function runNow() {
+    setJobEvents([]);
     setMessage("正在启动任务并连接运行终端...");
 
     const controller = new AbortController();
@@ -278,8 +250,7 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
       setActiveJobStatus(json.status ?? "");
       setTerminalOpen(true);
       if (json.jobId) {
-        const detail = await loadJob(json.jobId);
-        await autoResumeQrIfNeeded(json.jobId, detail);
+        await loadJob(json.jobId);
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
@@ -295,6 +266,14 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  async function cancelActiveJob() {
+    if (!activeJobId) return;
+    const res = await fetch(`${apiBase}/admin/jobs/${activeJobId}/cancel`, { method: "POST", credentials: "include" });
+    const json = await res.json();
+    setMessage(json.message ?? (res.ok ? "任务已停止" : "停止失败"));
+    await loadJob(activeJobId);
   }
 
   async function submitJobInput(text: string) {
@@ -325,7 +304,7 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
   }
 
   useEffect(() => {
-    if (!terminalOpen || !activeJobId) {
+    if (!activeJobId || ["completed", "failed", "cancelled", "timeout"].includes(activeJobStatus)) {
       return;
     }
 
@@ -334,7 +313,7 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
     }, 2000);
 
     return () => clearInterval(timer);
-  }, [terminalOpen, activeJobId]);
+  }, [activeJobId, activeJobStatus]);
 
   useEffect(() => {
     if (!terminalOpen) {
@@ -592,8 +571,8 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
             </button>
           </div>
           <div className="flex flex-wrap gap-3">
-            <button className="button disabled:cursor-not-allowed disabled:opacity-50" disabled={Boolean(sourceMeta.inUse)} onClick={runNow}>
-              立即运行
+            <button className="button disabled:cursor-not-allowed disabled:opacity-50" disabled={Boolean(sourceMeta.inUse) && sourceMeta.activeJob?.status !== "waiting_for_auth"} onClick={runNow}>
+              {sourceMeta.activeJob?.status === "waiting_for_auth" ? "扫码登录并继续" : "立即运行"}
             </button>
             <button className="button-secondary disabled:cursor-not-allowed disabled:opacity-50" disabled={!sourceMeta.inUse} onClick={openActiveJobTerminal}>
               打开运行终端
@@ -612,7 +591,7 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
               删除
             </button>
           </div>
-          <p className="text-xs text-muted">点击立即运行会直接打开终端，可查看脚本输出并输入认证信息。</p>
+          <p className="text-xs text-muted">点击立即运行可查看实时日志。需要扫码时会自动弹出二维码，登录后继续下载。</p>
         </div>
 
         <div className="card space-y-3">
@@ -638,8 +617,10 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
         </div>
       </div>
 
+      <ConnectorAuthDialog jobId={activeJobId} status={activeJobStatus} events={jobEvents} />
+
       {terminalOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4">
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/55 p-4">
           <div
             className={`w-full rounded-lg border border-line bg-white p-4 shadow-xl ${
               terminalFullscreen ? "h-[98vh] max-w-none" : "h-[90vh] max-w-6xl"
@@ -694,6 +675,9 @@ export default function AdminSourceDetailPage({ params }: { params: { id: string
             </div>
 
             <div className="flex gap-2">
+              <button className="button-secondary" disabled={!activeJobId || ["completed", "failed", "cancelled", "timeout"].includes(activeJobStatus)} onClick={cancelActiveJob}>
+                停止任务
+              </button>
               <button className="button-secondary" onClick={() => activeJobId && loadJob(activeJobId)}>
                 刷新日志
               </button>

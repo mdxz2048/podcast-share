@@ -358,6 +358,7 @@ export async function executeSourceImport(
     createdBy: string | null;
     additionalInput?: Record<string, unknown>;
     existingJobId?: string;
+    onStarted?: (jobId: string) => void;
   }
 ): Promise<{ jobId: string; status: JobStatus; summary: { programs: number; episodes: number; media: number; failed: number } }> {
   const context = await loadSourceExecutionContext(app, params.sourceId);
@@ -427,6 +428,8 @@ export async function executeSourceImport(
     packagePath: context.packagePath
   });
 
+  params.onStarted?.(jobId);
+
   const runnerEventCallbackBaseUrl = env.RUNNER_EVENT_CALLBACK_BASE_URL ?? env.API_BASE_URL;
   await writeJobLog(app, jobId, "calling runner internal run endpoint", {
     runnerBaseUrl: env.RUNNER_BASE_URL,
@@ -438,6 +441,7 @@ export async function executeSourceImport(
   try {
     const runnerResult = await requestRunner(`${env.RUNNER_BASE_URL}/internal/run-import`, {
       jobId,
+      triggerType: params.triggerType,
       packagePath: context.packagePath,
       manifest: context.manifestJson,
       inputConfig: mergedInput,
@@ -486,6 +490,11 @@ export async function executeSourceImport(
       status,
       summary: emptyImportSummary()
     };
+  }
+
+  const currentJob = await app.pg.query("select status from import_jobs where id = $1", [jobId]);
+  if (currentJob.rows[0] && isTerminalJobStatus(currentJob.rows[0].status as JobStatus)) {
+    return { jobId, status: currentJob.rows[0].status as JobStatus, summary: { programs: 0, episodes: 0, media: 0, failed: 0 } };
   }
 
   const events = Array.isArray(runnerJson.events) ? (runnerJson.events as Array<Record<string, unknown>>) : [];
