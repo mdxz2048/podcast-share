@@ -271,8 +271,8 @@ async function loadExistingExternalEpisodeIds(app: FastifyInstance, sourceId: st
      join programs p on p.id = e.program_id
      where p.source_id = $1
        and e.external_episode_id is not null
-     order by e.created_at desc
-     limit 10000`,
+       and exists (select 1 from media_assets m where m.episode_id = e.id and m.status = 'ready')
+     order by e.created_at desc`,
     [sourceId]
   );
   return res.rows.map((row) => row.external_episode_id).filter((value): value is string => typeof value === "string" && value.length > 0);
@@ -442,6 +442,7 @@ export async function executeSourceImport(
     const runnerResult = await requestRunner(`${env.RUNNER_BASE_URL}/internal/run-import`, {
       jobId,
       triggerType: params.triggerType,
+      sourceId: params.sourceId,
       packagePath: context.packagePath,
       manifest: context.manifestJson,
       inputConfig: mergedInput,

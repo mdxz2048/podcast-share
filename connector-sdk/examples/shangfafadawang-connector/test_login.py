@@ -2,16 +2,32 @@ import json
 import os
 import sys
 import tempfile
+import runpy
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent / "scripts"))
 from xet import XetClient
+from xet import manifest_ids
 import wx_login
 
 EXPIRED = {"code": 0, "data": {"token_info": {"value": ""}}}
 VALID = {"code": 0, "data": {"token_info": {"value": "verified-session"}}}
+
+
+class MigrationDedupTests(unittest.TestCase):
+    def test_database_ids_skip_migrated_episodes_without_local_audio(self):
+        wrapper = runpy.run_path(str(Path(__file__).parent / "src/connector.py"))
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "episodes.json"
+            ids = ["shangfafadawang:shangfafadawang:a_existing",
+                   "shangfafadawang:shangfafadawang:a_existing"]
+            self.assertEqual(wrapper["seed_existing_manifest"](manifest, "shangfafadawang", ids), 1)
+            existing = manifest_ids(manifest)
+            candidates = ["a_existing", "a_new"]
+            self.assertEqual([item for item in candidates if item not in existing], ["a_new"])
+            self.assertEqual(list(Path(directory).glob("*.mp3")), [])
 
 
 class LoginTests(unittest.TestCase):

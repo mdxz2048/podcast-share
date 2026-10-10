@@ -5,6 +5,7 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { env } from "../config.js";
 import { createOpaqueToken, hashOpaqueToken } from "../utils/security.js";
+import { r2PublicUrl } from "../utils/media-storage.js";
 import { buildRssXml, parseRange, type FeedItem, type RssTemplate } from "../utils/rss.js";
 
 async function assertFeedOwner(app: FastifyInstance, userId: string, feedId: string) {
@@ -454,7 +455,7 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
 
     const itemRes = await app.pg.query(
             `select e.id as episode_id, e.title as episode_title, e.description as episode_description,
-              e.published_at, e.duration_seconds, m.size_bytes, m.content_type,
+              e.published_at, e.duration_seconds, m.size_bytes, m.content_type, m.storage_provider, m.storage_key,
               p.title as program_title, p.cover_image_url
        from rss_feed_programs rfp
        join programs p on p.id = rfp.program_id
@@ -496,7 +497,7 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
       title: row.episode_title,
       description: row.episode_description,
       publishedAt: row.published_at,
-      audioUrl: `${env.API_BASE_URL}/rss/private/${token}/episodes/${row.episode_id}/media`,
+      audioUrl: row.storage_provider === "r2" ? r2PublicUrl(row.storage_key) : `${env.API_BASE_URL}/rss/private/${token}/episodes/${row.episode_id}/media`,
       mediaLength: Number(row.size_bytes),
       mediaType: row.content_type,
       programTitle: row.program_title,
@@ -560,6 +561,11 @@ export async function rssRoutes(app: FastifyInstance): Promise<void> {
       const row = mediaRes.rows[0];
       if (row.publish_status !== "published" || row.is_archived || !row.is_published || row.is_hidden) {
         return reply.status(404).send({ message: "媒体不存在" });
+      }
+
+      if (row.storage_provider === "r2") {
+        reply.header("Cache-Control", "private, no-store");
+        return reply.code(302).header("Location", r2PublicUrl(row.storage_key)).send();
       }
 
       if (row.storage_provider !== "local") {

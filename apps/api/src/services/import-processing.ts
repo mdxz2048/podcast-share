@@ -1,4 +1,7 @@
 import { FastifyInstance } from "fastify";
+import { unlink } from "node:fs/promises";
+import { resolve } from "node:path";
+import { env } from "../config.js";
 import { encryptSecret } from "../utils/secrets.js";
 
 type RunnerEvent = Record<string, unknown>;
@@ -181,26 +184,36 @@ async function upsertMedia(app: FastifyInstance, sourceId: string, event: Runner
   }
 
   const episodeId = episodeRes.rows[0].id;
+  const provider = event.storage_provider === "r2" ? "r2" : "local";
+  const bucket = provider === "r2" && typeof event.storage_bucket === "string" ? event.storage_bucket : null;
+  if (provider === "r2" && (!bucket || !/^audio\/[a-f0-9]{64}\/[a-f0-9]{64}\.mp3$/.test(file))) return false;
 
   await app.pg.query(
     `insert into media_assets (
         id, episode_id, storage_provider, storage_bucket, storage_key, original_filename,
         content_type, size_bytes, checksum, duration_seconds, status, created_at, updated_at
      ) values (
-        gen_random_uuid(), $1, 'local', null, $2, $3,
+        gen_random_uuid(), $1, $8, $9, $2, $3,
         $4, $5, $6, $7, 'ready', now(), now()
      )
      on conflict (storage_key)
      do update set
+       storage_provider = excluded.storage_provider,
+       storage_bucket = excluded.storage_bucket,
        content_type = excluded.content_type,
        size_bytes = excluded.size_bytes,
        checksum = excluded.checksum,
        duration_seconds = coalesce(excluded.duration_seconds, media_assets.duration_seconds),
        status = 'ready',
        updated_at = now()`,
-    [episodeId, file, file.split("/").pop() ?? file, contentType, size, checksum, durationSeconds]
+    [episodeId, file, typeof event.original_filename === "string" ? event.original_filename : file.split("/").pop() ?? file, contentType, size, checksum, durationSeconds, provider, bucket]
   );
 
+  // Only remove the recovery copy after the database has recorded durable R2 media.
+  if (provider === "r2" && typeof event.staged_local_file === "string" && /^imports\/[a-f0-9-]+\/[^/\\]+$/.test(event.staged_local_file)) {
+    try { await unlink(resolve(process.cwd(), env.MEDIA_LOCAL_ROOT, event.staged_local_file)); }
+    catch (error) { app.log.warn({ episodeId }, "could not remove uploaded media recovery copy"); }
+  }
   return true;
 }
 

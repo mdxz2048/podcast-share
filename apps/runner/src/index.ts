@@ -3,6 +3,7 @@ import { cp, mkdtemp, mkdir, rm } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { loadR2Config, uploadAudio } from "./r2-storage.js";
 import AdmZip from "adm-zip";
 import Fastify from "fastify";
 import { z } from "zod";
@@ -11,6 +12,7 @@ const app = Fastify({ logger: true });
 
 const requestSchema = z.object({
 	jobId: z.string().uuid(),
+	sourceId: z.string().uuid().optional(),
 	triggerType: z.enum(["manual", "scheduled", "resume"]).default("manual"),
 	packagePath: z.string().min(1),
 	manifest: z.object({
@@ -179,8 +181,9 @@ async function postRunnerEvent(
 	}
 }
 
-async function stageMediaFiles(jobId: string, events: RunnerEvent[]) {
+async function stageMediaFiles(jobId: string, events: RunnerEvent[], sourceId: string) {
 	const mediaRoot = process.env.MEDIA_LOCAL_ROOT ?? "storage/media";
+	const r2 = loadR2Config();
 	const updates: Array<{ from: string; to: string }> = [];
 
 	for (const event of events) {
@@ -207,6 +210,16 @@ async function stageMediaFiles(jobId: string, events: RunnerEvent[]) {
 		await cp(sourcePath, targetAbsolute);
 
 		event.file = targetRelative.replaceAll("\\", "/");
+        if (r2) {
+            const uploaded = await uploadAudio(r2, targetAbsolute, `${sourceId}:${event.external_episode_id}`);
+            event.staged_local_file = event.file;
+            event.original_filename = basename(fileValue);
+            event.file = uploaded.key;
+            event.storage_provider = "r2";
+            event.storage_bucket = uploaded.bucket;
+            event.size = uploaded.size;
+            event.checksum = uploaded.checksum;
+        }
 		delete event.__runnerMediaRoot;
 		updates.push({ from: sourcePath, to: targetAbsolute });
 	}
@@ -429,7 +442,7 @@ app.post("/internal/run-import", async (request, reply) => {
 			events.push({ type: "log", level: "warn", message: runResult.stderr.trim() });
 		}
 
-		const copiedMedia = executionAbort.signal.aborted ? [] : await stageMediaFiles(body.jobId, events);
+		const copiedMedia = executionAbort.signal.aborted ? [] : await stageMediaFiles(body.jobId, events, body.sourceId ?? body.jobId);
 		const normalizedEvents = events.map((item) => {
 			const { __runnerMediaRoot, ...rest } = item;
 			return rest;
